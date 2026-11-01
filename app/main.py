@@ -3,14 +3,15 @@ import binascii
 import json
 import logging
 import os
-from contextlib import asynccontextmanager, contextmanager, nullcontext
-from contextvars import Context
+import queue
+import threading
+from contextlib import ExitStack, asynccontextmanager, contextmanager, nullcontext
 from decimal import Decimal
 from functools import partial
 from typing import Annotated
 
 import anyio
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import AfterValidator, BaseModel, Field, model_validator
 from starlette.concurrency import run_in_threadpool
@@ -96,8 +97,9 @@ class ScamCheckIn(BaseModel):
         return self
 
 
-# ponytail: one global cap of 2 checks at a time; per-seller rate limit once auth lands (RECHECK #3)
-SCAM_LIMIT = anyio.CapacityLimiter(2)
+# ponytail: one global cap of 2 checks at a time; per-seller rate limit once auth lands (RECHECK #3).
+# A thread's semaphore, not anyio's limiter: a demo check holds it in its own thread (_chat), with no task to own it
+SCAM_LIMIT = threading.BoundedSemaphore(2)
 
 
 def _admit(body: ScamCheckIn, request: Request) -> None:
@@ -110,9 +112,7 @@ def _admit(body: ScamCheckIn, request: Request) -> None:
 @contextmanager
 def _slot():
     """One of SCAM_LIMIT's slots for a check, or 503 when none is free."""
-    try:
-        SCAM_LIMIT.acquire_nowait()  # take the slot now: check-then-wait lets a whole burst through to queue
-    except anyio.WouldBlock:
+    if not SCAM_LIMIT.acquire(blocking=False):  # take the slot now: check-then-wait lets a whole burst through to queue
         raise HTTPException(503, "busy, try again")
     try:
         yield
@@ -136,76 +136,6 @@ def _line(kind: str, **fields) -> bytes:
             + "\n").encode()
 
 
-async def _stream_check(body: ScamCheckIn, session_id: str):
-    """The demo's check, as NDJSON: each PayPal call and each node's update as it happens, then the result.
-
-    Shows the tester what they sent (the sanitized chat, the screenshot's text, the quotes), which /scam-check never
-    returns. The session's turn and the slot are taken here, not in the route: the route returns before the stream
-    ends, and a generator that never starts would never release them.
-    """
-    try:
-        with demo.busy(session_id):
-            async for line in _checked(body, session_id):
-                yield line
-    except HTTPException as e:  # a chat message of this session is running
-        yield _line("error", message=e.detail)
-
-
-async def _checked(body: ScamCheckIn, session_id: str):
-    try:
-        SCAM_LIMIT.acquire_nowait()
-    except anyio.WouldBlock:
-        yield _line("error", message="busy, try again in a moment")
-        return
-    try:
-        calls = []
-        # every step runs in this one context: Starlette would run each next() in a fresh copy, losing the trace
-        ctx = Context()
-        ctx.run(paypal.trace.set, calls)
-        inputs = {"text": body.text, "image": body.image, "expected_amount": str(body.expected_amount),
-                  "expected_currency": body.expected_currency}
-        steps = ctx.run(scam_check.graph.stream, inputs, stream_mode=["updates", "values"])
-        final = None
-        while (step := await anyio.to_thread.run_sync(ctx.run, next, steps, None)) is not None:
-            mode, chunk = step
-            while calls:  # the calls a node made come before its update
-                yield _line("paypal", **calls.pop(0))
-            if mode == "values":
-                final = chunk
-                continue
-            for node, update in chunk.items():
-                if node == "ingest_input":  # stored first, so ending the session deletes this case too
-                    await anyio.to_thread.run_sync(db.add_demo_case, session_id, update["case_id"])
-                yield _line("node", node=node, update=update or {})
-        out = scam_check.result(final)
-        await anyio.to_thread.run_sync(demo.remember_case, session_id, out)
-        yield _line("result", **out, persisted=final["persisted"])
-    except scam_check.Unreadable as e:
-        yield _line("error", message=str(e))
-    except Exception as e:
-        log.warning("demo check failed: %s", type(e).__name__)
-        yield _line("error", message="the check could not run, try again")
-    finally:
-        SCAM_LIMIT.release()
-
-
-@app.post("/demo/api/check", dependencies=[Depends(demo.enabled)])
-def demo_check(body: ScamCheckIn, request: Request, session_id: str = Depends(demo.session)):
-    _admit(body, request)
-    return StreamingResponse(_stream_check(body, session_id), media_type="application/x-ndjson")
-
-
-class PriceIn(BaseModel):
-    image: Screenshot
-
-
-@app.post("/demo/api/price", dependencies=[Depends(demo.enabled)])
-def demo_price(body: PriceIn, request: Request, session_id: str = Depends(demo.session)):
-    """The amount a screenshot shows, for the seller to confirm as their price; nulls when it shows none."""
-    ratelimit.hit(request, "price")  # one vision call each
-    return demo.read_price(body.image) or {"amount": None, "currency": None}
-
-
 class ChatIn(BaseModel):
     message: str = Field("", max_length=scam_check.MAX_CHARS)
     image: Screenshot | None = None  # the buyer's chat as a screenshot, read only by the check
@@ -219,12 +149,41 @@ class ChatIn(BaseModel):
         return self
 
 
+def _chat(body: ChatIn, request: Request, session_id: str, held: ExitStack, put) -> None:
+    """The whole message, in a thread of its own, holding the session's busy() until its end: it finishes even if the
+    page goes away, so a check whose payment PayPal's claim took is always saved in the chat's thread. A message that
+    runs a scam check (the buyer's chat, after the price) counts as a check and takes a slot, as
+    chat.runs_scam_check asks. An hourly limit or no free slot is an error line."""
+    with held:  # one message at a time: the thread can't change between the decision and the turn
+        try:
+            runs_check = demo.runs_check(session_id, body.message, body.image)
+            ratelimit.hit(request, "message", *((["check"] + (["screenshot"] if body.image else [])) if runs_check else []))
+            with _slot() if runs_check else nullcontext():
+                for line in demo.chat_turn(session_id, body.message, body.image, runs_check):
+                    put(_line(line.pop("type"), **line))
+        except HTTPException as e:
+            put(_line("error", message=e.detail))
+        except Exception as e:
+            log.warning("demo chat failed: %s", type(e).__name__)
+            put(_line("error", message="the message could not be answered, try again"))
+    put(None)  # after busy() is given back: the page's next message never finds it taken
+
+
+async def _read(lines: queue.SimpleQueue):
+    # abandon_on_cancel: a page that goes away stops the reading, never the turn
+    while (line := await anyio.to_thread.run_sync(lines.get, abandon_on_cancel=True)) is not None:
+        yield line
+
+
 @app.post("/demo/api/chat", dependencies=[Depends(demo.enabled)])
-async def demo_chat(body: ChatIn, request: Request, session_id: str = Depends(demo.turn, scope="function")):
-    """One message to the chat graph. A message that runs a scam check (the buyer's chat, after the price) counts as
-    a check and takes a slot, as chat.runs_scam_check asks. demo.turn runs one message at a time per session, so the
-    thread can't change between that decision and the turn."""
-    runs_check = await anyio.to_thread.run_sync(demo.runs_check, session_id, body.message, body.image)
-    ratelimit.hit(request, "message", *((["check"] + (["screenshot"] if body.image else [])) if runs_check else []))
-    with _slot() if runs_check else nullcontext():
-        return await anyio.to_thread.run_sync(demo.chat_turn, session_id, body.message, body.image, runs_check)
+def demo_chat(body: ChatIn, request: Request, x_demo_session: str = Header("", max_length=64)):
+    """One message to the chat graph, as NDJSON: a check's PayPal calls and node updates as they happen, then the
+    reply. The updates show the tester what they sent (the sanitized chat, the screenshot's text, the quotes), which
+    /scam-check never returns. busy() is taken before the session is checked, as demo.turn: a busy session is a 409,
+    and one that just ended a 401. Then _chat's thread holds it."""
+    with ExitStack() as held:
+        held.enter_context(demo.busy(x_demo_session))
+        session_id = demo.session(x_demo_session)
+        lines = queue.SimpleQueue()
+        threading.Thread(target=_chat, args=(body, request, session_id, held.pop_all(), lines.put), daemon=True).start()
+    return StreamingResponse(_read(lines), media_type="application/x-ndjson")

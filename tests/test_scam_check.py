@@ -577,7 +577,8 @@ def test_api_an_unreadable_screenshot_gives_no_verdict(api, llm_stub, saved, tra
     r = client.post("/scam-check", json=BODY | {"text": PAID, "image": b64(PNG)})
     assert (r.status_code, r.json()["detail"]) == (422, detail)
     assert not saved and not api.calls  # no case stored, PayPal never asked
-    assert main.SCAM_LIMIT.borrowed_tokens == 0  # the slot is given back
+    with pytest.raises(ValueError):  # released past its bound: every slot is back
+        main.SCAM_LIMIT.release()
 
 
 @pytest.mark.parametrize("missing", ["expected_amount", "expected_currency"])

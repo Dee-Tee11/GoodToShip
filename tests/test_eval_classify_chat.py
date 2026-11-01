@@ -47,6 +47,7 @@ def kpis(rows) -> str:
         rate("injection", "intent", lambda r: r["kind"] == "injection"),
         rate("recall can_ship", "intent", lambda r: r["expected"]["intent"] == "can_ship"),
         rate("recall next_steps", "intent", lambda r: r["expected"]["intent"] == "next_steps"),
+        rate("recall topics", "intent", lambda r: r["expected"]["intent"] == "topics"),
         rate("look-alikes not advised", "route", lambda r: r["kind"] == "look-alike"),
         rate("required notes", "must"),
         rate("no wrong note shown", "notes"),

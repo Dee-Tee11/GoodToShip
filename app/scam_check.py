@@ -10,7 +10,7 @@ import unicodedata
 import uuid
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
-from typing import TypedDict
+from typing import Callable, TypedDict
 
 from langgraph.graph import END, START, StateGraph
 from pydantic import BaseModel, ConfigDict, create_model
@@ -41,7 +41,7 @@ POLICY = {  # the instruction to the seller, inserted verbatim by code
     "P.WAIT_NOT_CLEARED": "Don't ship yet.",
     "P.WAIT_WRONG_AMOUNT": "Don't ship. The amount paid is not your price.",
     "P.WAIT_TOO_OLD": "Don't ship. This payment is more than 14 days old, so it is likely from an earlier order.",
-    "P.WAIT_REUSED": "Don't ship. This payment was already used to approve another order.",
+    "P.WAIT_REUSED": "Don't ship. This payment was already used to approve an order.",
     "P.SCAM_LIKELY": "Don't ship the item unless the payment shows as Completed in your PayPal Activity.",
     "P.WAIT_NOT_CONFIRMED": "Not confirmed. Check your PayPal Activity for this payment before you ship.",
 }
@@ -94,14 +94,13 @@ STEPS = {  # policy_id: (label, what PayPal showed, next steps)
         (NEW_ID, "Check that one before you ship."),
     ),
     "P.WAIT_REUSED": (
-        "Already used", "PayPal has the payment, but Vendor Guard already used it to approve another order.",
+        "Already used", "PayPal has the payment, but Vendor Guard already used it to approve an order.",
         ("One payment pays for one order.", NEW_ID, "Check that one before you ship."),
     ),
     "P.WAIT_NOT_CONFIRMED": (
         "Not confirmed", "Vendor Guard couldn't find the payment in PayPal, or couldn't finish checking it.",
-        ("Look for a payment from this buyer in your PayPal Activity.",
-         "A transaction ID that PayPal can't find is not proof of a scam: PayPal gives the buyer and the seller "
-         "different transaction IDs for the same payment."),
+        ("Don't ship until you see a payment from this buyer, of your price, as Completed in your PayPal Activity.",
+         "The buyer may be honest: a transaction ID that PayPal can't find is not proof of a scam."),
     ),
 }
 SIGNAL_STEPS = {  # one more step per warning sign found, quote confirmed or not, in SIGNALS' order
@@ -526,8 +525,26 @@ def _build():
 graph = _build()
 
 
-def run(text: str, expected_amount: str, expected_currency: str, image: bytes | None = None) -> dict:
-    """Raises Unreadable when there is a screenshot that could not be read."""
-    out = graph.invoke({"text": text, "image": image, "expected_amount": expected_amount,
-                        "expected_currency": expected_currency})
+def run(text: str, expected_amount: str, expected_currency: str, image: bytes | None = None,
+        report: Callable[[dict], None] | None = None) -> dict:
+    """Raises Unreadable when there is a screenshot that could not be read. report, only from the demo's chat
+    (chat.check), gets each PayPal call before the update of the node that made it, for the page's live panel. The
+    updates hold what the tester sent: the cleaned chat, the quotes."""
+    inputs = {"text": text, "image": image, "expected_amount": expected_amount, "expected_currency": expected_currency}
+    if report is None:
+        out = graph.invoke(inputs)
+        return result(out) | {"persisted": out["persisted"]}
+    calls = []
+    token = paypal.trace.set(calls)
+    try:
+        for mode, chunk in graph.stream(inputs, stream_mode=["updates", "values"]):
+            while calls:
+                report({"type": "paypal", **calls.pop(0)})
+            if mode == "values":
+                out = chunk
+            else:
+                for node, update in chunk.items():
+                    report({"type": "node", "node": node, "update": update or {}})
+    finally:
+        paypal.trace.reset(token)
     return result(out) | {"persisted": out["persisted"]}

@@ -3,7 +3,6 @@ import base64
 import importlib
 import json
 from datetime import date
-from pathlib import Path
 from types import SimpleNamespace
 
 import httpx
@@ -165,9 +164,14 @@ def test_c01_the_intro_once_even_when_the_messages_are_cleared(choice, talk):
         assert out["messages"][-1].content.startswith(chat.INTRO) == (n == 0)
 
 
-def test_c01_notes_lists_the_note_titles_without_the_llm(choice, talk):
-    reply = talk(" Notes ")
-    assert reply.startswith("Notes I have: ") and all(e["title"] in reply for e in policy_pack.verified().values())
+def greeted(talk):
+    """The thread as the demo's new session leaves it: the intro was shown."""
+    talk.graph.update_state(talk.config, {"greeted": True}, as_node="other")
+
+
+def test_c01_notes_shows_the_topics_without_the_llm(choice, talk):
+    greeted(talk)
+    assert talk(" Notes ") == chat.TOPICS
     assert not choice.calls
 
 
@@ -184,7 +188,7 @@ def test_c02_the_check_sends_the_chat_unchanged_with_the_sellers_price(choice, t
     assert talk("check") == chat.ASK_PRICE
     assert talk("usd 25,5") == chat.ASK_CHAT
     reply = talk(ODD_CHAT)
-    assert ran == [(ODD_CHAT, "25.5", "USD", None)]
+    assert ran == [(ODD_CHAT, "25.5", "USD", None, None)]
     assert reply.startswith("WAIT: ") and "Case c1" in reply and "QUOTE-CANARY" not in reply
     assert not talk.state["awaiting"] and not talk.state["price"]
     assert choice.calls == [] and not tavily.called
@@ -421,7 +425,6 @@ def test_u16_every_outcome_has_a_what_to_do_note():
         text = chat.VERIFIED[f"vg_{pid[2:].lower()}"]["text"]
         assert scam_check.POLICY[pid] in text and text.endswith(scam_check.SUPPORT)
     assert scam_check.CONTACT_PAYPAL.startswith(policy_pack.PAYPAL_PAGES)
-    assert f'"{scam_check.CONTACT_PAYPAL}"' in (Path(chat.__file__).parent / "static/demo.html").read_text()
 
 
 @pytest.fixture
@@ -467,7 +470,7 @@ def test_c17_a_screenshot_at_the_chat_step_runs_the_check_with_it(choice, talk, 
     talk("check")
     talk("25.00 USD")
     assert talk(shot()).startswith("WAIT: ")
-    assert ran == [("", "25.00", "USD", PNG)] and not talk.state["awaiting"] and choice.calls == []
+    assert ran == [("", "25.00", "USD", PNG, None)] and not talk.state["awaiting"] and choice.calls == []
 
 
 def test_c17_an_unreadable_screenshot_is_asked_again(choice, talk, monkeypatch):
@@ -575,7 +578,7 @@ def test_c20_a_question_at_the_price_step_is_answered_and_ends_the_check(choice,
     assert not talk.state["awaiting"] and not talk.state["price"] and not ran
 
 
-@pytest.mark.parametrize("intent", ["other", "scam_check", "not_paypal"])
+@pytest.mark.parametrize("intent", ["other", "scam_check", "not_paypal", "topics"])
 def test_c20_anything_else_at_the_price_step_asks_for_the_price_again(choice, talk, ran, intent):
     talk("check")
     choice.intent = intent
@@ -826,7 +829,7 @@ def test_c28_a_screenshot_before_check_gets_a_reply_for_an_image_and_is_not_kept
     kept = repr({k: v for k, v in talk.state.items() if k != "messages"})
     assert repr(PNG) not in kept and "base64" not in kept
     talk("25.00 USD")
-    assert talk(shot()).startswith("WAIT: ") and ran == [("", "25.00", "USD", PNG)]
+    assert talk(shot()).startswith("WAIT: ") and ran == [("", "25.00", "USD", PNG, None)]
 
 
 HOW = chat.VERIFIED["vg_how_to_check"]["text"]
@@ -978,7 +981,7 @@ def test_c33_what_now_while_waiting_for_the_chat_goes_to_the_check(choice, talk,
     talk("25.00 USD")
     choice.intent = "next_steps"
     talk("what now?")
-    assert choice.calls == [] and ran == [("what now?", "25.00", "USD", None)]
+    assert choice.calls == [] and ran == [("what now?", "25.00", "USD", None, None)]
 
 
 @pytest.mark.parametrize("message, calls", [("Can I talk to a real person?", 1), (" Operator ", 0)],
@@ -1000,7 +1003,7 @@ def test_c34_while_waiting_for_the_chat_operator_is_the_buyers_chat(choice, demo
     demo_talk("check")
     demo_talk("25.00 USD")
     demo_talk("operator")  # as "what now?" (C33): what comes at this step is the buyer's
-    assert choice.calls == [] and ran == [("operator", "25.00", "USD", None)]
+    assert choice.calls == [] and ran == [("operator", "25.00", "USD", None, None)]
 
 
 @pytest.mark.parametrize("answer", ["yes", "Yes!", "ok", "sure", "yes please", "Sim", "sim, por favor", "claro"])
@@ -1116,17 +1119,14 @@ def test_c38_a_lone_hold_pick_without_a_hold_is_how_to_check(choice, talk):  # E
     assert talk.state["entries"] == ["vg_how_to_check"] and HOLD_TITLE not in reply
 
 
-@pytest.mark.parametrize("via", ["the chat's check", "the demo's panel", "the price step"])
+@pytest.mark.parametrize("via", ["the chat's check", "the price step"])
 def test_c38_a_check_ends_the_hold_talk_before_it(choice, talk, ran, via):
     choice.intent, choice.entries = "question", ["pp_payment_hold"]
     assert HOLD_TITLE in talk("Why is my payment on hold?")
-    if via == "the demo's panel":
-        talk.graph.update_state(talk.config, chat.after_check(FAKE_RESULT), as_node="check")
-    else:
-        talk("check")
-        if via == "the chat's check":
-            talk("25.00 USD")
-            talk(PAID)
+    talk("check")
+    if via == "the chat's check":
+        talk("25.00 USD")
+        talk(PAID)
     talk("Why isn't it in my account?")  # PayPal has no record of it: never "PayPal will release the hold"
     assert talk.state["entries"] == ["vg_how_to_check"] and "previous message" not in choice.calls[-1].user
 
@@ -1191,6 +1191,78 @@ def test_c39_a_repeat_of_the_last_checks_note_keeps_its_heading(choice, talk):
     assert talk("What do I do now?").startswith("About your last check (case cccccccc):")
     assert talk("And then?") == (f"About your last check (case cccccccc):\n\n{chat._note('vg_verified')}"
                                  f"\n\n{scam_check.SUPPORT}")
+
+
+def test_c40_the_intro_offers_a_person_only_on_the_demo(choice, talk, demo_talk):
+    assert demo_talk("Hello!") == chat.intro(True) == f"{chat.intro(False)}\n\n{chat.PERSON}"
+    assert talk("Hello!") == chat.intro(False) and chat.PERSON not in chat.intro(False)
+    assert chat.intro(False).startswith(chat.INTRO)  # the same three things everywhere
+
+
+def test_c41_each_area_word_lists_its_notes_without_the_llm(choice, talk):
+    greeted(talk)
+    replies = [talk(word) for word in ("Vendor Guard", " warning signs ", "PayPal", "DISPUTES")]
+    verdicts = {k for k in chat.VERIFIED if k in chat.VERDICT_NOTES or k == "vg_verdicts"}
+    assert len(verdicts) == 10
+    for key, entry in chat.VERIFIED.items():  # a new note lands in exactly one area, a verdict's note in none
+        title = entry["title"].removeprefix("Warning sign: ")
+        line = f"- {title[:1].upper()}{title[1:]}"
+        assert sum(line in reply.splitlines() for reply in replies) == (key not in verdicts), key
+    assert [r.splitlines()[0] for r in replies] == [f"My notes on {name}:" for name, _ in chat.AREAS.values()]
+    assert all(r.endswith("\nAsk me about any of them.") and "Warning sign" not in r for r in replies)
+    assert chat.AFTER_CHECK in replies[0] and not any(chat.AFTER_CHECK in r for r in replies[1:])
+    assert not choice.calls
+
+
+@pytest.mark.parametrize("message, area", [
+    ("What do you know?", None),
+    ("Hi, I am Amanda and I have a few questions regarding a possible scam, can you help me?", None),
+    ("What do you know about disputes?", "disputes"),
+    ("Which warning sign should I watch for?", "warning signs"),
+    ("I have a few questions regarding selling in paypal what do you know?", "PayPal"),
+    ("Hi Vendor Guard, what do you know about PayPal?", "PayPal"),  # the most specific area wins
+    ("Hi Vendor Guard, can you help me?", "Vendor Guard"),
+])
+def test_c42_topics_from_the_llm_lists_the_area_the_message_names_or_the_areas(choice, talk, message, area):
+    greeted(talk)
+    choice.intent = "topics"
+    reply = talk(message)
+    assert reply == chat.TOPICS if area is None else reply.startswith(f"My notes on {area}:\n")
+    assert len(choice.calls) == 1
+
+
+def test_c42_before_the_greeting_the_intro_comes_first(choice, talk):
+    choice.intent = "topics"
+    assert talk("What do you know?") == chat.intro(False)
+    assert talk("What do you know?") == chat.TOPICS
+
+
+@pytest.mark.parametrize("run, streams", [("demo", True), ("json", False), ("none", False)],
+                         ids=["the demo's", "JSON, as Studio sends it", "none"])
+def test_c43_only_the_demos_run_streams_the_checks_steps(choice, api, saved, llm_stub, run, streams):
+    """The steps carry the buyer's chat and quotes, for the demo's live panel: JSON can't hold chat.LIVE, so Studio and
+    the evals never get them. Either way scam_check's state stays out of the thread."""
+    # read here, not at collection: a fixture above reloads chat, which makes a new LIVE
+    context = {"demo": {"live": chat.LIVE}, "json": {"live": True}, "none": None}[run]
+    capture(api, httpx.Response(404))
+    search(api)
+    llm_stub.signals = TWO_SIGNALS
+    talk = Talk(context)
+    talk("check")
+    talk("25.00 EUR")
+    out = list(talk.graph.stream({"messages": [{"role": "user", "content": SCAM_CHAT}]}, talk.config, context=context,
+                                 stream_mode=["custom", "values"]))
+    assert out[-1][1]["messages"][-1].content.startswith("SCAM_LIKELY: ")
+    steps = [chunk for mode, chunk in out if mode == "custom"]
+    assert bool(steps) == streams
+    if streams:
+        nodes = [s["node"] for s in steps if s["type"] == "node"]
+        assert nodes[0] == "ingest_input" and nodes[-1] == "persist_case" and "verify_payment" in nodes
+        assert [s["status"] for s in steps if s["type"] == "paypal"] == [404, 200]
+        verify = next(i for i, s in enumerate(steps) if s.get("node") == "verify_payment")
+        assert all(i < verify for i, s in enumerate(steps) if s["type"] == "paypal")  # a node's calls, then its update
+        assert TWO_SIGNALS["off_platform"] in json.dumps(steps, default=str)  # what the panel shows the tester
+    assert {c.config["configurable"]["checkpoint_ns"] for c in talk.saver.list(None)} == {""}
 
 
 def test_u26_before_you_ship_is_scam_checks_own_sentences_and_never_gated():

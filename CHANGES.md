@@ -1,5 +1,114 @@
 # Changes
 
+## 2026-11-01: review fixes for the streamed chat and the shared conversation
+
+- Each demo chat message runs in a thread of its own (`main._chat`), which holds the session's `busy()` and the check
+  slot until the turn ends, and writes its lines to a queue the response only reads. A page that goes away mid-check
+  no longer cuts it: before, closing the half-read graph stream blocked the event loop until the check node ended,
+  then threw its result away after PayPal's claim took the payment, so the chat sent again got "already used". A
+  reload's first message gets a 409 until the check ends.
+- `/demo/api/chat` takes `busy()` before it checks the session, as `demo.turn` does: a busy session is a 409 again (it
+  was an error line) and one that just ended a 401, never a message run on a deleted session. An hourly limit or no
+  free slot are still error lines.
+- `SCAM_LIMIT` is a `threading.BoundedSemaphore`: anyio's limiter belongs to the task that took it, and the message's
+  thread has none. It could also leak a slot when a cancelled stream was closed in another task.
+- The case is stored after the graph run, not at `ingest_input`: storing it can't fail halfway through the check any
+  more. The custom stream and `chat.LIVE` are used only for a message that runs a check, so other messages run their
+  nodes inline.
+- `scam_check.run(..., report=None)`, not the `scam_check.progress` ContextVar: `chat.check` passes the stream writer.
+  With no reporter it is `graph.invoke` again, and the PayPal trace is reset when the run ends.
+- The person's Close closes the card they clicked (`db.close_handoff(session_id, handoff_id)`), never a newer one the
+  seller opened since. A busy session tells them "the seller's last message is still on its way".
+- `chat.CLOSED` says what's really deleted: "…closed, and what they saw is deleted. I've forgotten this chat, so let's
+  start again. The checks you ran stay on record until this demo ends, so a payment you already checked still counts
+  as used." It said everything asked, checked and shared was gone, but the cases and claimed payments stay until the
+  session ends.
+- The intro follows `OPERATOR_TOKEN` now: the closed notice and `/demo/api/state`'s new `intro`, which the page shows
+  after a reload in place of the one saved with the session.
+- The page: while a person has the conversation, it reads the state before it sends, so the closed notice comes
+  before the new message's reply. The buyer's-chat chips do nothing but explain while the seller is asked to share or
+  a person has the chat (before, "check" answered the question or went to the person), and they send "check" and the
+  price without the attached screenshot, which stays for the buyer's chat.
+- Left as they are: `notes` before the greeting still gets the intro (C42 pins it, and the demo greets first); the
+  `handoffs` table change has no migration (test data only, dropped on Neon by hand); `db.relay`'s connection per
+  message gets a `ponytail:` comment; the 30 messages an hour stay, relayed messages and chip steps included.
+- Tests: D32 (a check cut short, by a page that never reads the stream or by storing its case failing, is still saved
+  in the chat's thread) and D33 (Close on a stale card, and a busy session) are new; D16, D17, D24, D31 and the slot
+  tests changed. 483 passing; `tests/test_db.py` 5 passing against a throwaway Postgres 16. Not tried in a browser.
+
+## 2026-10-31: a shared conversation is the person's until either side closes it
+
+- After the seller's yes, Vendor Guard no longer answers: each message goes to the open handoff only (`db.relay`, in
+  one statement), as a `relayed` line, with no graph step, model call or check. Before, the person answered once and
+  the handoff closed (`answered`), while the seller's later messages went to Vendor Guard and never reached them.
+- The person answers as often as they like (`replies`, also appended to the transcript); the card stays open and is
+  redrawn when `updated_at` changes, keeping the draft. **Close** (`POST /demo/api/operator/handoffs/{id}/close`) or
+  the seller's **Stop sharing** (`POST /demo/api/handoff/close`) closes it: the stored transcript and last check are
+  emptied, the chat thread and in-memory transcript are deleted, and the thread is greeted again. `/demo/api/state`
+  gives a closed handoff the `notice` the page shows once: `chat.CLOSED` ("…I've forgotten this chat…") and the intro.
+- `ASK_CONSENT` and `SHARED` say Vendor Guard doesn't answer while the person has it, and that closing deletes what
+  they saw and starts the chat over. No graph change: no node, state field or edge.
+- `handoffs`: `status` is `open` or `closed`; `reply` and `answered_at` gave way to `replies`, `updated_at` and
+  `closed_at`. `add_handoff` no longer updates an open one (none can be open when the yes comes). There are no
+  migrations: the table was dropped on Neon by hand (one answered demo row) and recreated by `db.init()`.
+- Tests: D25 rewritten (several answers, the seller's reply relayed), D30 and D31 new, D20's second yes removed;
+  `tests/test_db.py`'s handoff test rewritten and run against a throwaway Postgres (5 passing). 480 passing. Tried
+  against the local server and Neon: operator, yes, a relayed message, an answer, Stop sharing and the notice.
+
+## 2026-10-31: the demo's operator section follows the server
+
+- The page showed its operator section from `operators` in `/demo/api/session`, saved in sessionStorage: a session
+  started while the server had no `OPERATOR_TOKEN` kept it hidden after the token was set, while the chat offered a
+  person. `operators` moves to `/demo/api/state`, read at each 4-second poll. D24 checks it there.
+- The operator token field shows what was pasted (`type="text"`, no longer a password field).
+
+## 2026-10-31: the demo's chat speaks first, lists its topics, and runs the check with its steps live
+
+- The intro ends, on the demo only (`operators` in the run's context), with "When I can't help, a person from Vendor
+  Guard can: say operator." Studio and the evals keep the old intro. `chat.intro()` writes it for `other` and the demo.
+- Vendor Guard speaks first: `/demo/api/session` marks the new thread greeted (`update_state` as `other`) and returns
+  the intro, which the page shows as the first message, after a reload too. A "Hi" after it gets the one-line reply.
+  The greeting is fixed text and stays out of the operator's transcript.
+- A new closed intent, `topics`: the seller asks what Vendor Guard knows or what they can ask, or says they have
+  questions without asking one yet ("I have a few questions, can you help me?", which was `other`). It goes to
+  `other`, which lists the four areas of notes, or the titles of the area the message names (disputes, warning signs,
+  PayPal, then Vendor Guard). `notes` and the four names, alone, get it with no LLM call. A note's area comes from the
+  sets in `chat.py`, so a new note is listed with no change; the verdicts' notes are in none. At the price step it
+  gets "I need the amount…", as `other` does.
+- E06: case 30 is now `topics`, and cases 41–44 are new (`E06-chat-20261031T161621Z`). Cases 1–40 fail as in the
+  morning's full run (5, 7, 9, 10, 12, 19, 22, 29, 40), except 30, which now passes; 3 of the 4 new ones pass. Case 43,
+  "What do you know about disputes?", was read as a question and showed the first two dispute notes. Cases 1–40 used
+  89,667 tokens, against 71,273 in the morning: longer reasoning on greetings, disputes and other services.
+- The demo's check runs only in the chat. With `chat.LIVE` in the run's context (only the demo's: JSON can't hold
+  it), `check` sends each PayPal call and node update through LangGraph's custom stream (`scam_check.progress`). The
+  writer is called through a copy of the node's context: in the empty one it raises. `/demo/api/chat` streams NDJSON,
+  the steps then the reply; a busy session, a limit or no free slot is an error line. The case is stored at
+  `ingest_input`, so the reply's `Case …` line is no longer parsed.
+- Gone with the check panel: `/demo/api/check`, `/demo/api/price`, `read_price`, `remember_case` and the `price`
+  limit. The buyer's chats are chips in the chat that send "check" and the price, then leave the chat in the box.
+  `ASK_CONSENT` no longer mentions the panel.
+- Tests: C40–C43 and D29 are new; D08 and D10 check through the chat; D09, D18, D19, D23 and C38's panel case are
+  removed; U16 no longer reads the page. 477 passing.
+- Tried against a local server with the real Groq, PayPal sandbox and Neon: the greeting, "Hi", the areas,
+  "disputes", then a check whose steps arrived over 3.5 s, and "What now?" about it. Nobody clicked through the page
+  itself: there is no browser automation here.
+
+## 2026-10-31: RECHECK quick wins
+
+- `P.WAIT_REUSED` says "already used to approve an order", not "another order": a re-check of a payment this chat
+  already VERIFIED was told it paid for another order (E07 44). RECHECK #36 removed; naming the earlier case moved
+  to #30.
+- `P.WAIT_NOT_CONFIRMED`'s steps: "Don't ship until you see a payment from this buyer, of your price, as Completed in
+  your PayPal Activity." and "The buyer may be honest: a transaction ID that PayPal can't find is not proof of a scam."
+  The card never said not to ship, and the "different transaction IDs" fact is left to `pp_different_ids`, in
+  PayPal's words. RECHECK #22 removed; on the next rerun, E06 4 and E07 3 and 24 should still get `pp_different_ids`.
+- E07 and E08 save each check's `template` flag and report "template, not the LLM" in the KPIs. RECHECK #25 removed;
+  judging how the explanation reads moved to #17.
+- RECHECK #14 removed, checked against Neon's docs (ip-allow, plans): the Free plan doesn't delete data ("None of
+  these limits delete your data"), but it has no IP Allow, so the connection string is the only lock. Moving to a plan
+  with an allowlist before real cases is now under #18.
+- Unit tests unchanged and passing (468). No eval was rerun.
+
 ## 2026-10-31: PayPal's hold note only for a hold; a failed answer step offers a person
 
 - `classify` keeps `pp_payment_hold` ("Add Tracking… PayPal will release the hold…") only when the seller's message or

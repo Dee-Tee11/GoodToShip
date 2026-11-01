@@ -6,7 +6,8 @@ notes are quoted, then PayPal's line, or a person on the demo. Every other word 
 scam_check, or comes from PayPal (a title and a link). The buyer's chat goes to scam_check.run() as typed and never
 reaches this module's LLM calls or Tavily. The price comes from the seller's own message, read by a regex. A seller
 who asks for a person (the human intent, or the word operator) is asked first whether the conversation may be shared:
-handoff only records the answer, with no LLM and no database.
+handoff only records the answer, with no LLM and no database. On the demo, the shared conversation is then the
+person's: the seller's messages go to them, never through this graph, until either closes it (app/demo.py).
 """
 import base64
 import binascii
@@ -15,9 +16,11 @@ import logging
 import os
 import re
 from decimal import Decimal
+from functools import partial
 from typing import Literal
 
 import httpx
+from langgraph.config import get_stream_writer
 from langgraph.graph import END, START, MessagesState, StateGraph
 from langgraph.runtime import get_runtime
 from pydantic import ConfigDict, create_model
@@ -31,7 +34,7 @@ TAVILY_URL = "https://api.tavily.com/search"
 TAVILY_KEY = os.getenv("TAVILY_API_KEY", "").strip()
 MAX_QUESTION = 400  # longer messages are treated as a pasted chat; also an old hard limit of Tavily's query
 INTENTS = ("question", "scam_check", "dispute", "not_paypal", "another_payment", "can_ship", "next_steps", "human",
-           "other")
+           "topics", "other")
 DISPUTE_KEYS = ("pp_dispute_vs_claim", "pp_dispute_deadline", "pp_chargeback", "pp_snad_not_covered", "pp_proof_of_delivery")
 # advise's "what now?" after a dispute note: how to respond, and by when
 DISPUTE_NOTES = {*DISPUTE_KEYS, "pp_respond_to_dispute", "pp_unauthorized_claim", "pp_proof_of_shipment"}
@@ -75,9 +78,12 @@ CLASSIFY_PROMPT = (
     "- human: the seller asks to talk to a person, a human or someone at Vendor Guard, for example 'can I talk to a real "
     "person?', 'is there a human here?', 'quero falar com uma pessoa'. Asking how to contact PayPal or its support is "
     "question.\n"
-    "- other: greetings, introductions, thanks, small talk, anything not about PayPal or Vendor Guard, requests about "
-    "your own instructions or prompt, or a seller who says they have questions or need help "
-    "(even about a possible scam) without asking a concrete one yet.\n"
+    "- topics: the seller asks what you know, which topics you have notes on or what they can ask you, or says they "
+    "have questions or need help (even about a possible scam) without asking a concrete one yet, also after a greeting "
+    "or an introduction, for example 'what do you know?', 'what can I ask you?', 'I have a few questions, can you help "
+    "me?'.\n"
+    "- other: greetings, introductions, thanks, small talk, anything not about PayPal or Vendor Guard, or requests "
+    "about your own instructions or prompt.\n"
     "For question or dispute, also pick up to 2 notes from this list that directly answer it, best first, or none if "
     "none does: "
     "a note about Vendor Guard's own verdicts and checks never answers a question about PayPal itself (its holds, "
@@ -153,9 +159,19 @@ INTRO = ("Hi! I'm Vendor Guard, and I help PayPal sellers with three things:\n"
          "or point you to PayPal's own pages. Say notes to see the topics I have notes on.\n"
          "2. Checking a buyer's payment before you ship.\n"
          "3. Disputes: how they work. Preparing your response for you to approve is coming soon.")
+PERSON = "When I can't help, a person from Vendor Guard can: say operator."  # the intro's last line, on the demo only
 DISPUTE_TEXT = ("The buyer opens a dispute in PayPal, and you, the seller, respond to it. Vendor Guard will prepare that "
                 "response for you to approve before anything is sent. That part isn't ready yet.")
 SCOPE = "I can help with selling on PayPal: questions about it, checking a buyer's payment before you ship, and disputes."
+# the topics reply, an area per line in this order. Each verified note falls in one by the sets above (_area); the
+# keys are also fixed words, as check
+AREAS = {"vendor guard": ("Vendor Guard", "how I check a payment and what WAIT means"),
+         "warning signs": ("warning signs", "what buyers say in scams (overpayment, fake proof, Friends and Family…)"),
+         "paypal": ("PayPal", "holds, Seller Protection, tracking, refunds"),
+         "disputes": ("disputes", "disputes, claims and chargebacks")}
+TOPICS = ("I have checked notes on four areas:\n" + "".join(f"- {name}: {what}\n" for name, what in AREAS.values())
+          + "Which would you like to know more about? Say its name, or just ask your question.")
+AFTER_CHECK = "After a check, ask me what its result means."  # the verdicts' notes: only for the seller's own check
 BYE = "Glad I could help. Bye!"
 NOT_PAYPAL = ("Vendor Guard only works with PayPal: I can check a PayPal payment before you ship and explain PayPal "
               "disputes. For a bank transfer, another payment app or another marketplace's case, check with that "
@@ -163,12 +179,21 @@ NOT_PAYPAL = ("Vendor Guard only works with PayPal: I can check a PayPal payment
 # handoff's. The question lists exactly what a person from Vendor Guard would see
 ASK_CONSENT = ("A person from Vendor Guard can read this conversation and answer you here. They will see everything from "
                "this demo session: every message you sent me, including any buyer's chat or screenshot you sent for a "
-               "check, every reply I gave, the results of the checks you ran in the check panel, and your last check's "
-               "case number, outcome, warning signs and amounts. It is deleted when the session ends. Share it? Say "
-               "yes, or anything else to keep it private.")
-SHARED = "Sent to Vendor Guard's team. Their answer will appear here, in this chat. Meanwhile, you can keep asking me."
+               "check, every reply I gave, and your last check's case number, outcome, warning signs and amounts. "
+               "While they have it, your messages go to them and I don't answer. When you or they close it, what they "
+               "saw is deleted, and I forget this chat and start again. Share it? Say yes, or anything else to keep it "
+               "private.")
+SHARED = ("Sent to Vendor Guard's team. A person will answer you here, in this chat. Until the conversation is closed, "
+          "your messages go to them and I don't answer. To close it, press Stop sharing.")
+# the demo's, when the seller or the person closes a shared conversation: the chat starts over (demo._close)
+CLOSED = ("The conversation with Vendor Guard's team is closed, and what they saw is deleted. I've forgotten this chat, "
+          "so let's start again. The checks you ran stay on record until this demo ends, so a payment you already "
+          "checked still counts as used.")
 NOT_SHARED = "OK, nothing was shared. If you meant to ask or check something, send it again."
 DEMO_ONLY = "Talking to a person from Vendor Guard isn't available here for now."  # Studio, evals, a demo without OPERATOR_TOKEN
+# only the demo's run carries it, as context={"live": LIVE}: then check streams scam_check's steps to the page. An object,
+# not a flag: Studio and the API take a run's context as JSON, which can't hold it
+LIVE = object()
 
 LABEL = re.compile(r"(?im)^\s*(buyer|seller)\s*:")  # the screenshot copy's labels, or a seller who pastes them
 NUMBER = r"([0-9]{1,10}(?:[.,][0-9]{1,2})?)"  # as ScamCheckIn: at most 12 digits, 2 of them decimals
@@ -222,7 +247,7 @@ class State(MessagesState, total=False):  # Studio's Chat tab needs a state that
     last_question: str | None
     shown: list[str]  # the notes in the last reply; written by every node that replies
     # {"case_id", "policy_id", "signals", "price"?, "paid"?}: codes, and E1's two amounts as "40.00 USD", validated;
-    # written by check, the demo's panel too
+    # written by check
     last_case: dict | None
     greeted: bool  # the introduction was shown: once per thread; written by other
     # the seller's answer to handoff's question; written by handoff only, so it stays True on later turns until
@@ -373,15 +398,14 @@ def _case_note(case: dict | None) -> str | None:
 
 
 def after_check(out: dict) -> dict:
-    """What a check leaves in the chat, from check() or the demo's panel: its codes, no notes shown and no message
-    before it. Its note's sentences in classify's context made the LLM apply them to another order (E07 cases 37, 51,
-    2026-10-30), and a hold asked about before the check kept the hold note after it."""
+    """What a check leaves in the chat: its codes, no notes shown and no message before it. Its note's sentences in
+    classify's context made the LLM apply them to another order (E07 cases 37, 51, 2026-10-30), and a hold asked about
+    before the check kept the hold note after it."""
     return {"last_case": last_case(out), "shown": [], "last_question": None}
 
 
 def card(out: dict) -> str:
-    """A check's result as the chat shows it, for check() and the demo's transcript: never the evidence, which holds
-    the buyer's quotes."""
+    """A check's result as the chat shows it: never the evidence, which holds the buyer's quotes."""
     return "\n".join([f"{out['verdict']}: {out['message']}", *(s["text"] for s in out["sentences"]), "What to do:",
                       *(f"{n}. {s}" for n, s in enumerate(out["steps"], 1)), out["support"], f"Case {out['case_id']}"])
 
@@ -406,8 +430,8 @@ def _previous(state) -> str:
 @owns("intent", "entries", "sentences", "last_question")
 def classify(state):
     question = sanitize(_text(state))[:MAX_QUESTION]
-    if question.casefold() == "notes":  # a fixed word, as check: no LLM call, other() lists the notes
-        return {"intent": "other", "entries": [], "sentences": [], "last_question": question}
+    if question.casefold() in ("notes", *AREAS):  # fixed words, as check: no LLM call, other() lists the topics
+        return {"intent": "topics", "entries": [], "sentences": [], "last_question": question}
     if question.casefold() == "operator":  # a fixed word too: handoff asks before anything is shared
         return {"intent": "human", "entries": [], "sentences": [], "last_question": question}
     if INSTRUCTION.search(question):  # no LLM call; and not kept as the next message's context
@@ -504,7 +528,12 @@ def check(state):
         price = state["price"]
         # an empty context: a graph invoked inside a node inherits the caller's checkpointer and stream, which would
         # store scam_check's state (the chat, the buyer's quotes) in this thread and stream it to Studio
-        out = contextvars.Context().run(scam_check.run, text, price["amount"], price["currency"], image)
+        report = None
+        if (get_runtime().context or {}).get("live") is LIVE:  # the demo's page shows each step as it runs
+            # the writer reads the node's config when it is called, which the empty context lacks: it runs in a copy
+            # of this one
+            report = partial(contextvars.copy_context().run, get_stream_writer())
+        out = contextvars.Context().run(scam_check.run, text, price["amount"], price["currency"], image, report)
     except scam_check.Unreadable as e:  # no verdict and no case: the seller sends it again
         return _say(f"{str(e).capitalize()}. Type cancel to stop.")
     except Exception as e:
@@ -647,14 +676,44 @@ def dispute(state):
     return _answer(state, [DISPUTE_TEXT, *_notes(keys)], keys)
 
 
+def _area(key: str) -> str | None:
+    """The topics area a verified note is listed under: none for the verdicts' notes, shown only after a check."""
+    if key in VERDICT_NOTES or key == "vg_verdicts":
+        return None
+    if key in SCAM_NOTES:
+        return "warning signs"
+    if key in DISPUTE_NOTES:
+        return "disputes"
+    return "vendor guard" if key.startswith("vg_") else "paypal"
+
+
+def _topics(text: str) -> str:
+    """The areas, or the titles of one area's notes when the message is its name or names it: code's words, no LLM.
+    In a longer message the most specific area wins: sellers also call the bot Vendor Guard."""
+    text = sanitize(text).casefold()
+    area = text if text in AREAS else next((a for a in ("disputes", "warning signs", "paypal", "vendor guard")
+                                            if re.search(rf"\b{a.removesuffix('s')}s?\b", text)), None)
+    if not area:
+        return TOPICS
+    titles = [VERIFIED[k]["title"].removeprefix("Warning sign: ") for k in VERIFIED if _area(k) == area]
+    return "\n".join([f"My notes on {AREAS[area][0]}:", *(f"- {t[:1].upper()}{t[1:]}" for t in titles),
+                      *([AFTER_CHECK] if area == "vendor guard" else []), "Ask me about any of them."])
+
+
+def intro(operators: bool) -> str:
+    """The greeting: what Vendor Guard does, how to start a check and, on the demo, who answers when it can't. other()
+    shows it once per thread; the demo shows it first, from its new session."""
+    return "\n\n".join([INTRO, policy_pack.POLICY_PACK["vg_how_to_check"]["text"], *([PERSON] if operators else [])])
+
+
 @owns("messages", "shown", "greeted")
 def other(state):
     if state.get("intent") == "not_paypal":
         return _say(NOT_PAYPAL, shown=[])
-    if _text(state).strip().casefold() == "notes":
-        return _say("Notes I have: " + "; ".join(e["title"] for e in VERIFIED.values()) + ".", shown=[])
     if not state.get("greeted"):  # a state field: the demo clears the messages every turn
-        return _say(f"{INTRO}\n\n{policy_pack.POLICY_PACK['vg_how_to_check']['text']}", shown=[], greeted=True)
+        return _say(intro(_operators()), shown=[], greeted=True)
+    if state.get("intent") == "topics":
+        return _say(_topics(_text(state)), shown=[])
     return _say(BYE if GOODBYE.search(_text(state)) else SCOPE, shown=[])
 
 

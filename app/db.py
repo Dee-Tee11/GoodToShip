@@ -33,16 +33,18 @@ SCHEMA = (
     """CREATE TABLE IF NOT EXISTS demo_cases (
     case_id text PRIMARY KEY,
     session_id text NOT NULL REFERENCES demo_sessions ON DELETE CASCADE)""",
-    # a session's conversation, shared with a person from Vendor Guard after the seller's yes (app/chat.py handoff)
+    # a session's conversation, shared with a person from Vendor Guard after the seller's yes (app/chat.py handoff),
+    # theirs until the seller or they close it. replies: the person's answers, for the seller's page
     """CREATE TABLE IF NOT EXISTS handoffs (
     id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     session_id text NOT NULL REFERENCES demo_sessions ON DELETE CASCADE,
     transcript jsonb NOT NULL,
     last_case jsonb,
-    status text NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'answered')),
-    reply text,
+    status text NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'closed')),
+    replies jsonb NOT NULL DEFAULT '[]',
     shared_at timestamptz NOT NULL DEFAULT now(),
-    answered_at timestamptz)""",
+    updated_at timestamptz NOT NULL DEFAULT now(),
+    closed_at timestamptz)""",
     "CREATE UNIQUE INDEX IF NOT EXISTS handoffs_one_open ON handoffs (session_id) WHERE status = 'open'",
 )
 DEMO_IDLE = "30 minutes"  # a demo session with no request for this long is over
@@ -130,32 +132,55 @@ def add_demo_case(session_id: str, case_id: str) -> None:
 
 
 def add_handoff(session_id: str, transcript: list[dict], last_case: dict | None) -> None:
-    """The session's open handoff now holds this transcript: a new one, or the open one updated (one open per
-    session, by handoffs_one_open). After an answer, a new one."""
+    """A new open handoff with this transcript. Never a second one: while one is open, the seller's messages go to it
+    (relay), never to the graph's handoff, and handoffs_one_open refuses a second."""
     with _connect() as c:
-        c.execute(
-            "INSERT INTO handoffs (session_id, transcript, last_case) VALUES (%s, %s, %s) "
-            "ON CONFLICT (session_id) WHERE status = 'open' "
-            "DO UPDATE SET transcript = EXCLUDED.transcript, last_case = EXCLUDED.last_case, shared_at = now()",
-            (session_id, Jsonb(transcript), Jsonb(last_case) if last_case else None),
-        )
+        c.execute("INSERT INTO handoffs (session_id, transcript, last_case) VALUES (%s, %s, %s)",
+                  (session_id, Jsonb(transcript), Jsonb(last_case) if last_case else None))
+
+
+def relay(session_id: str, said: dict) -> bool:
+    """True if the session has an open handoff, which now ends with what the seller said. One statement: an answer
+    appended at the same moment is never lost."""
+    # ponytail: one more connection per demo message with OPERATOR_TOKEN, shared or not; fold it into
+    # touch_demo_session's statement if Neon's round trip shows
+    with _connect() as c:
+        return c.execute("UPDATE handoffs SET transcript = transcript || %s, updated_at = now() "
+                         "WHERE session_id = %s AND status = 'open'", (Jsonb([said]), session_id)).rowcount == 1
 
 
 def open_handoffs() -> list[dict]:
     """Every session's open handoff, oldest first, for the operator. Never the session id: it is the session's key."""
     with _connect() as c:
-        rows = c.execute("SELECT id, transcript, last_case, shared_at FROM handoffs WHERE status = 'open' "
+        rows = c.execute("SELECT id, transcript, last_case, shared_at, updated_at FROM handoffs WHERE status = 'open' "
                          "ORDER BY shared_at").fetchall()
-    return [{"id": r[0], "transcript": r[1], "last_case": r[2], "shared_at": r[3].isoformat()} for r in rows]
+    return [{"id": r[0], "transcript": r[1], "last_case": r[2], "shared_at": r[3].isoformat(),
+             "updated_at": r[4].isoformat()} for r in rows]
 
 
-def answer_handoff(handoff_id: int, reply: str) -> str | None:
-    """The handoff's session id if it was open (now answered with this reply), None if it was answered already or is
-    gone. The id stays on the server: it is the session's key."""
+def answer_handoff(handoff_id: int, reply: str) -> bool:
+    """True if the handoff is open, and now ends with this answer, in its transcript and its replies."""
     with _connect() as c:
-        row = c.execute("UPDATE handoffs SET status = 'answered', reply = %s, answered_at = now() "
-                        "WHERE id = %s AND status = 'open' RETURNING session_id", (reply, handoff_id)).fetchone()
+        return c.execute("UPDATE handoffs SET transcript = transcript || %s, replies = replies || %s, updated_at = now() "
+                         "WHERE id = %s AND status = 'open'",
+                         (Jsonb([{"who": "operator", "text": reply}]), Jsonb([reply]), handoff_id)).rowcount == 1
+
+
+def open_handoff_session(handoff_id: int) -> str | None:
+    """The session of this handoff if it is open. The id stays on the server: it is the session's key."""
+    with _connect() as c:
+        row = c.execute("SELECT session_id FROM handoffs WHERE id = %s AND status = 'open'", (handoff_id,)).fetchone()
     return row[0] if row else None
+
+
+def close_handoff(session_id: str, handoff_id: int | None = None) -> bool:
+    """True if the session had an open handoff (this one, with handoff_id: the card the person clicked, never a newer
+    one the seller opened since), now closed: what the person saw is deleted, their answers stay for the seller's page
+    until the session ends."""
+    with _connect() as c:
+        return c.execute("UPDATE handoffs SET status = 'closed', transcript = '[]', last_case = NULL, "
+                         "updated_at = now(), closed_at = now() WHERE session_id = %s AND status = 'open' "
+                         "AND (%s::bigint IS NULL OR id = %s)", (session_id, handoff_id, handoff_id)).rowcount == 1
 
 
 def demo_state(session_id: str) -> dict:
@@ -168,13 +193,13 @@ def demo_state(session_id: str) -> dict:
         events = c.execute(
             "SELECT id, event_type, body->>'summary', body->'resource'->>'id', body->'resource'->>'status', received_at "
             f"FROM webhook_events WHERE body->'resource'->>'id' IN ({SALE_IDS}) ORDER BY received_at", ids).fetchall()
-        handoffs = c.execute("SELECT id, status, reply FROM handoffs WHERE session_id = ANY(%(ids)s) ORDER BY id",
+        handoffs = c.execute("SELECT id, status, replies FROM handoffs WHERE session_id = ANY(%(ids)s) ORDER BY id",
                              ids).fetchall()
     return {
         "sales": [dict(zip(("order_id", "item", "amount", "capture_id", "capture_status"), r)) for r in sales],
         "events": [{"id": e[0], "event_type": e[1], "summary": e[2], "resource_id": e[3], "status": e[4],
                     "received_at": e[5].isoformat()} for e in events],
-        "handoffs": [dict(zip(("id", "status", "reply"), r)) for r in handoffs],
+        "handoffs": [dict(zip(("id", "status", "replies"), r)) for r in handoffs],
     }
 
 

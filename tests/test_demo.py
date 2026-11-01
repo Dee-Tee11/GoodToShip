@@ -2,10 +2,13 @@
 import base64
 import itertools
 import json
+import threading
+import time
 
 import httpx
 import pytest
 from fastapi.testclient import TestClient
+from starlette.requests import Request
 
 from app import chat, db, demo, main, paypal, ratelimit, scam_check
 from tests.conftest import BEARER
@@ -25,32 +28,49 @@ NODES = ["ingest_input", "read_screenshot", "sanitize_untrusted", "detect_signal
 @pytest.fixture
 def demo_db(monkeypatch):
     """The demo on, with fake demo tables: sessions -> {"sales": {order_id: row}, "cases": [case_id],
-    "handoffs": [row]}, the handoffs as the SQL keeps them: one open per session, answered once (tests/test_db.py)."""
+    "handoffs": [row]}, the handoffs as the SQL keeps them: one open per session until it is closed
+    (tests/test_db.py)."""
     monkeypatch.setattr(demo, "ENABLED", True)
     monkeypatch.setenv("DEMO_BUYER_EMAIL", "buyer@example.com")
     monkeypatch.setenv("DEMO_BUYER_PASSWORD", "sandbox-pass")
-    sessions, ids = {}, itertools.count(1)
+    sessions, ids, stamps = {}, itertools.count(1), itertools.count(1)
     monkeypatch.setattr(db, "new_demo_session",
                         lambda sid: sessions.setdefault(sid, {"sales": {}, "cases": [], "handoffs": []}))
 
+    def open_row(sid=None, hid=None):  # (session id, its open handoff), or (None, None)
+        return next(((s, r) for s, v in sessions.items() for r in v["handoffs"]
+                     if r["status"] == "open" and (s == sid or r["id"] == hid)), (None, None))
+
     def add_handoff(sid, transcript, case):
-        rows = sessions[sid]["handoffs"]
-        if not rows or rows[-1]["status"] != "open":
-            rows.append({"id": next(ids), "status": "open", "reply": None, "shared_at": "2026-10-30T12:00:00+00:00"})
-        rows[-1].update(transcript=transcript, last_case=case)
+        assert not open_row(sid)[1], "handoffs_one_open refuses a second"
+        sessions[sid]["handoffs"].append({"id": next(ids), "status": "open", "transcript": transcript,
+                                          "last_case": case, "replies": [], "shared_at": "2026-10-30T12:00:00+00:00",
+                                          "updated_at": next(stamps)})
+
+    def relay(sid, said):
+        if row := open_row(sid)[1]:
+            row.update(transcript=[*row["transcript"], said], updated_at=next(stamps))
+        return bool(row)
 
     def answer_handoff(hid, reply):
-        for sid, s in sessions.items():
-            for row in s["handoffs"]:
-                if row["id"] == hid and row["status"] == "open":
-                    row.update(status="answered", reply=reply)
-                    return sid
-        return None
+        if row := open_row(hid=hid)[1]:
+            row.update(transcript=[*row["transcript"], {"who": "operator", "text": reply}],
+                       replies=[*row["replies"], reply], updated_at=next(stamps))
+        return bool(row)
+
+    def close_handoff(sid, hid=None):
+        if (row := open_row(sid)[1]) and hid in (None, row["id"]):
+            row.update(status="closed", transcript=[], last_case=None, updated_at=next(stamps))
+            return True
+        return False
 
     monkeypatch.setattr(db, "add_handoff", add_handoff)
+    monkeypatch.setattr(db, "relay", relay)
     monkeypatch.setattr(db, "answer_handoff", answer_handoff)
+    monkeypatch.setattr(db, "open_handoff_session", lambda hid: open_row(hid=hid)[0])
+    monkeypatch.setattr(db, "close_handoff", close_handoff)
     monkeypatch.setattr(db, "open_handoffs", lambda: [
-        {k: r[k] for k in ("id", "transcript", "last_case", "shared_at")}
+        {k: r[k] for k in ("id", "transcript", "last_case", "shared_at", "updated_at")}
         for s in sessions.values() for r in s["handoffs"] if r["status"] == "open"])
     monkeypatch.setattr(db, "touch_demo_session", lambda sid: sid in sessions)
     monkeypatch.setattr(db, "end_demo_sessions", lambda sid=None: [sid] if sid and sessions.pop(sid, None) else [])
@@ -61,7 +81,7 @@ def demo_db(monkeypatch):
     monkeypatch.setattr(db, "add_demo_case", lambda sid, case_id: sessions[sid]["cases"].append(case_id))
     monkeypatch.setattr(db, "demo_state", lambda sid: {
         "sales": list(sessions[sid]["sales"].values()), "events": [],
-        "handoffs": [{k: r[k] for k in ("id", "status", "reply")} for r in sessions[sid]["handoffs"]]})
+        "handoffs": [{k: r[k] for k in ("id", "status", "replies")} for r in sessions[sid]["handoffs"]]})
     monkeypatch.setattr(db, "save_case", lambda case_id, verdict, result: None)
     return sessions
 
@@ -77,9 +97,9 @@ def lines(r):
 
 
 def test_d01_off_by_default():
-    for method, path in [("GET", "/demo"), ("POST", "/demo/api/session"), ("POST", "/demo/api/check"),
-                         ("POST", "/demo/api/chat"), ("POST", "/demo/api/price"), ("GET", "/demo/api/operator/handoffs")]:
-        assert client.request(method, path, json=CHECK).status_code == 404
+    for method, path in [("GET", "/demo"), ("POST", "/demo/api/session"), ("POST", "/demo/api/chat"),
+                         ("GET", "/demo/api/operator/handoffs")]:
+        assert client.request(method, path, json={"message": "hi"}).status_code == 404
 
 
 def test_d02_never_starts_against_live_paypal_or_without_the_buyer_account(demo_db, monkeypatch):
@@ -102,7 +122,7 @@ def test_d03_session_gives_the_page_what_it_needs(demo_db):
 @pytest.mark.parametrize("headers", [{}, {"X-Demo-Session": "gone"}], ids=["none", "ended"])
 def test_d04_no_session_is_401(demo_db, headers):
     assert client.get("/demo/api/state", headers=headers).status_code == 401
-    assert client.post("/demo/api/check", json=CHECK, headers=headers).status_code == 401
+    assert say(headers, "hi").status_code == 401
 
 
 def test_d05_a_sale_is_created_and_captured_once(api, demo_db):
@@ -134,56 +154,47 @@ def test_d07_prices_stay_between_1_and_1000_usd(demo_db, amount):
     assert client.post("/demo/api/orders", json={"item": "Camera", "amount": amount}, headers=start()).status_code == 422
 
 
-def test_d08_the_check_streams_every_node_and_paypal_call_then_the_same_result(api, llm_stub, demo_db):
+def test_d08_the_chats_check_streams_every_node_and_paypal_call_then_its_reply(api, llm_stub, demo_db, choice):
     h = start()
     capture(api, httpx.Response(200, json=USD_PAID))
-    out = lines(client.post("/demo/api/check", json=CHECK, headers=h))
+    out = check_in_chat(h)
     nodes = [x["node"] for x in out if x["type"] == "node"]
     assert sorted(nodes) == sorted(NODES) and nodes[0] == "ingest_input" and nodes[-1] == "persist_case"
     call = next(x for x in out if x["type"] == "paypal")
     assert call["path"] == f"/v2/payments/captures/{TID}" and call["status"] == 200 and "links" not in call["body"]
     assert out.index(call) < next(i for i, x in enumerate(out) if x.get("node") == "verify_payment")
-    result = out[-1]
-    assert result["type"] == "result" and result["verdict"] == "VERIFIED"
+    reply = out[-1]
+    assert reply["type"] == "reply" and reply["route"] == "check" and reply["reply"].startswith("VERIFIED: ")
     case_id = next(x["update"]["case_id"] for x in out if x.get("node") == "ingest_input")
-    assert demo_db[h["X-Demo-Session"]]["cases"] == [case_id]  # stored before the check ends, so ending deletes it
+    assert demo_db[h["X-Demo-Session"]]["cases"] == [case_id]  # so ending the session deletes it
+    assert reply["reply"].endswith(f"Case {case_id}") and not choice.calls
     assert BEARER not in json.dumps(out) and "CANARY" not in json.dumps(out)
 
 
-def test_d08_the_stream_shows_signals_and_the_rule(api, llm_stub, demo_db):
+def test_d08_the_stream_shows_signals_and_the_rule(api, llm_stub, demo_db, choice):
     llm_stub.signals = TWO_SIGNALS
     capture(api, httpx.Response(404))
     api.get("/v1/reporting/transactions").mock(return_value=httpx.Response(200, json={"transaction_details": []}))
-    out = lines(client.post("/demo/api/check", json=CHECK | {"text": SCAM_CHAT}, headers=start()))
+    out = check_in_chat(start(), SCAM_CHAT)
     update = {x["node"]: x["update"] for x in out if x["type"] == "node"}
     assert {s["type"] for s in update["detect_signals"]["signals"]} == {"URGENCY_PRESSURE", "OFF_PLATFORM"}
-    assert update["compute_verdict"]["policy_id"] == "P.SCAM_LIKELY" and out[-1]["verdict"] == "SCAM_LIKELY"
+    assert update["compute_verdict"]["policy_id"] == "P.SCAM_LIKELY" and out[-1]["reply"].startswith("SCAM_LIKELY: ")
     assert [x["status"] for x in out if x["type"] == "paypal"] == [404, 200]
 
 
-def test_d09_an_unreadable_screenshot_is_an_error_line(api, llm_stub, demo_db):
-    llm_stub.transcript = RuntimeError("vision down")
-    out = lines(client.post("/demo/api/check", json=CHECK | {"text": "", "image": "iVBORw0KGgoAAAAAAAAAAA=="},
-                            headers=start()))
-    assert out[-1]["type"] == "error" and "screenshot" in out[-1]["message"]
-
-
 class Full:
-    def acquire_nowait(self):
-        raise main.anyio.WouldBlock
+    def acquire(self, blocking=True):
+        return False
 
     def release(self):
         raise AssertionError("released a slot it never took")
 
 
-def test_d10_busy_is_an_error_line_and_every_check_gives_its_slot_back(api, llm_stub, demo_db, monkeypatch):
+def test_d10_every_check_gives_its_slot_back(api, llm_stub, demo_db, choice, monkeypatch):
     capture(api, httpx.Response(200, json=USD_PAID))
-    monkeypatch.setattr(main, "SCAM_LIMIT", Full())
-    assert lines(client.post("/demo/api/check", json=CHECK, headers=start()))[-1] == \
-        {"type": "error", "message": "busy, try again in a moment"}
-    monkeypatch.setattr(main, "SCAM_LIMIT", main.anyio.CapacityLimiter(1))
+    monkeypatch.setattr(main, "SCAM_LIMIT", threading.BoundedSemaphore(1))
     for _ in range(2):  # a slot that was not given back would make the second check busy
-        assert lines(client.post("/demo/api/check", json=CHECK, headers=start()))[-1]["type"] == "result"
+        assert check_in_chat(start())[-1]["type"] == "reply"
 
 
 def test_d11_ten_checks_an_hour_per_ip(monkeypatch):
@@ -201,14 +212,28 @@ def test_d11_three_screenshots_an_hour_per_ip(monkeypatch):
     assert len(ratelimit._hits[("testclient", "check")]) == 4
 
 
-def say(h, message):
-    return client.post("/demo/api/chat", json={"message": message}, headers=h)
+def say(h, message, image=None):
+    return client.post("/demo/api/chat", json={"message": message} | ({"image": image} if image else {}), headers=h)
+
+
+def said(h, message, image=None):
+    """The reply to one chat message: the last line of its stream."""
+    *_, reply = lines(say(h, message, image))
+    assert reply.pop("type") == "reply", reply
+    return reply
+
+
+def check_in_chat(h, chat_text=PAID):
+    """A check through the chat: check, the price, then the buyer's chat. That last message's lines."""
+    said(h, "check")
+    said(h, "45.00 USD")
+    return lines(say(h, chat_text))
 
 
 def test_d12_a_question_is_routed_and_answered_from_a_verified_note(demo_db, choice):
     key = "vg_why_wait"
     choice.intent, choice.entries = "question", [key]
-    r = say(start(), "What does WAIT mean?").json()
+    r = said(start(), "What does WAIT mean?")
     assert r["route"] == "question" and r["intent"] == "question" and r["notes"] == [key]
     assert chat.VERIFIED[key]["text"] in r["reply"] and len(choice.calls) == 1
 
@@ -216,15 +241,15 @@ def test_d12_a_question_is_routed_and_answered_from_a_verified_note(demo_db, cho
 def test_d13_the_chat_runs_a_check_over_three_messages_in_its_own_session(api, demo_db, choice):
     capture(api, httpx.Response(200, json=USD_PAID))
     h, other = start(), start("2.2.2.2")
-    assert say(h, "check").json() == {"reply": chat.ASK_PRICE, "route": "start_check", "intent": None, "notes": [],
+    assert said(h, "check") == {"reply": chat.ASK_PRICE, "route": "start_check", "intent": None, "notes": [],
                                       "awaiting": "price"}
-    assert say(h, "45.00 USD").json()["awaiting"] == "chat"
-    r = say(h, PAID).json()
+    assert said(h, "45.00 USD")["awaiting"] == "chat"
+    r = said(h, PAID)
     assert r["route"] == "check" and r["reply"].startswith("VERIFIED: ") and r["awaiting"] is None
     case_id = r["reply"].rsplit("Case ", 1)[1]
     assert demo_db[h["X-Demo-Session"]]["cases"] == [case_id]  # so ending the session deletes it
     assert choice.calls == []  # the check flow never calls classify
-    assert say(other, "45.00 USD").json()["route"] != "check"  # another session's thread knows nothing of the price
+    assert said(other, "45.00 USD")["route"] != "check"  # another session's thread knows nothing of the price
     assert len(ratelimit._hits[("1.1.1.1", "check")]) == 1  # the buyer's chat counted as a check
 
 
@@ -233,9 +258,9 @@ def test_d14_the_message_that_runs_a_check_needs_a_free_slot(api, demo_db, choic
     say(h, "check")
     say(h, "45.00 USD")
     monkeypatch.setattr(main, "SCAM_LIMIT", Full())
-    assert say(h, PAID).status_code == 503
+    assert lines(say(h, PAID)) == [{"type": "error", "message": "busy, try again"}]
     assert demo.runs_check(h["X-Demo-Session"], PAID)  # nothing ran: the chat can be sent again
-    assert say(h, " ").json()["reply"] == chat.BAD_CHAT  # check() runs no scam_check for it: no slot, not counted
+    assert said(h, " ")["reply"] == chat.BAD_CHAT  # check() runs no scam_check for it: no slot, not counted
     assert say(start(), "hello").status_code == 200  # other messages don't need a slot
     assert len(ratelimit._hits[("1.1.1.1", "check")]) == 1  # the chat refused for want of a slot, not the blank one
 
@@ -259,10 +284,11 @@ def test_d15_ending_or_sweeping_the_session_forgets_its_conversation(demo_db, ch
 def test_d16_a_session_takes_one_message_at_a_time(demo_db, choice):
     h = start()
     demo._busy.add(h["X-Demo-Session"])  # a message still running
-    assert say(h, "hello").status_code == 409
+    r = say(h, "hello")
+    assert (r.status_code, r.json()["detail"]) == (409, "your last message is still running, wait for its answer")
     assert client.post("/demo/api/end", headers=h).status_code == 409  # can't delete the thread under it
     demo._busy.discard(h["X-Demo-Session"])
-    assert say(h, "hello").status_code == 200 and say(h, "hello").status_code == 200  # given back every time
+    assert said(h, "hello") and said(h, "hello")  # given back every time
     assert client.post("/demo/api/end", headers=h).status_code == 200 and not demo._busy
     assert say(h, "hello").status_code == 401
 
@@ -273,44 +299,15 @@ def test_d17_a_screenshot_in_the_chat_runs_the_check_and_counts_as_one(demo_db, 
         "case_id": "c1", "verdict": "WAIT", "policy_id": "P.WAIT_NOT_CONFIRMED", "message": "m", "sentences": [],
         "steps": ["s"], "support": "help", "evidence": {"E1": {}}, "persisted": True})
     h, png = start(), "iVBORw0KGgoAAAAAAAAAAA=="
-    early = client.post("/demo/api/chat", json={"message": "", "image": png}, headers=h).json()
+    early = said(h, "", png)
     assert early["route"] == "start_check" and not ran  # before the price: not read, not a check
     say(h, "45.00 USD")
-    r = client.post("/demo/api/chat", json={"message": "", "image": png}, headers=h).json()
-    assert r["route"] == "check" and ran == [("", "45.00", "USD", base64.b64decode(png))]
+    r = said(h, "", png)
+    (args,) = ran
+    assert r["route"] == "check" and args[:4] == ("", "45.00", "USD", base64.b64decode(png)) and callable(args[4])
     assert [len(ratelimit._hits[("1.1.1.1", k)]) for k in ("check", "screenshot")] == [1, 1]
     for bad in ({"message": ""}, {"message": "", "image": "R0lGODlhAQABAAAAACw="}, {"image": "data:image/png;base64,x"}):
         assert client.post("/demo/api/chat", json=bad, headers=h).status_code == 422
-
-
-def test_d18_a_screenshot_suggests_a_price_and_never_runs_a_check(demo_db, monkeypatch):
-    said = iter(["45.00 USD", "You paid $45.00", "NONE", "12 EUR", "1 USD"])
-    monkeypatch.setattr(main.llm, "read_image", lambda prompt, image: next(said))
-    monkeypatch.setattr(scam_check, "run", lambda *args: pytest.fail("a price read must not run a check"))
-    h, png = start(), {"image": "iVBORw0KGgoAAAAAAAAAAA=="}
-    got = [client.post("/demo/api/price", json=png, headers=h).json() for _ in range(5)]
-    assert got == [{"amount": "45.00", "currency": "USD"}] + [{"amount": None, "currency": None}] * 2 + [
-        {"amount": "12", "currency": "EUR"}, {"amount": "1", "currency": "USD"}]  # only what parse_price accepts
-    assert client.post("/demo/api/price", json=png, headers=h).status_code == 429  # 5 an hour: each is a vision call
-    assert client.post("/demo/api/price", json=png).status_code == 401
-
-
-def test_d19_the_panels_check_is_the_chats_last_case(api, llm_stub, demo_db):
-    h = start()
-    capture(api, httpx.Response(200, json=USD_PAID))
-    result = lines(client.post("/demo/api/check", json=CHECK, headers=h))[-1]
-    values = demo.chat_graph.get_state(demo._thread(h["X-Demo-Session"])).values
-    assert values["last_case"] == {"case_id": result["case_id"], "policy_id": "P.VERIFIED", "signals": [],
-                                  "price": "45.00 USD", "paid": "45.00 USD"}
-    assert values["shown"] == [] and not demo._busy  # as a chat check leaves it: no note from before the check
-
-
-def test_d19_the_panel_and_the_chat_take_turns(api, llm_stub, demo_db):
-    h = start()
-    with demo.busy(h["X-Demo-Session"]):  # a chat message of this session is running
-        assert lines(client.post("/demo/api/check", json=CHECK, headers=h)) == [
-            {"type": "error", "message": "your last message or check is still running, wait for its answer"}]
-    assert not demo._busy
 
 
 FAKE = {"case_id": "c1", "verdict": "WAIT", "policy_id": "P.WAIT_NOT_CONFIRMED", "message": "m", "sentences": [],
@@ -329,11 +326,11 @@ def test_d20_only_a_yes_hands_the_whole_conversation_over(demo_db, choice, monke
     client.post("/demo/api/chat", json={"message": "", "image": png}, headers=h)  # before check: never read
     say(h, "45.00 USD")
     client.post("/demo/api/chat", json={"message": "Buyer: paid", "image": png}, headers=h)  # the check reads it
-    r = say(h, "operator").json()
+    r = said(h, "operator")
     assert r["route"] == "handoff" and r["reply"] == chat.ASK_CONSENT and not handoffs
-    assert say(h, "no").json()["reply"] == chat.NOT_SHARED and not handoffs
+    assert said(h, "no")["reply"] == chat.NOT_SHARED and not handoffs
     say(h, "operator")
-    assert say(h, "yes").json()["reply"] == chat.SHARED
+    assert said(h, "yes")["reply"] == chat.SHARED
     (row,) = handoffs
     assert row["last_case"] == {"case_id": "c1", "policy_id": "P.WAIT_NOT_CONFIRMED", "signals": []}
     assert row["transcript"] == [
@@ -354,10 +351,6 @@ def test_d20_only_a_yes_hands_the_whole_conversation_over(demo_db, choice, monke
         {"who": "seller", "text": "yes"},
         {"who": "vendor_guard", "text": chat.SHARED},
     ]
-    first = row["transcript"]
-    say(h, "operator")
-    say(h, "yes")  # a second yes updates the open handoff, as handoffs_one_open makes the SQL do
-    assert handoffs == [row] and row["transcript"][:16] == first and len(row["transcript"]) == 20
 
 
 def test_d21_ending_or_sweeping_the_session_forgets_its_transcript(demo_db, choice, monkeypatch):
@@ -381,22 +374,13 @@ def test_d22_a_handoff_the_database_refuses_leaves_no_sent_behind(demo_db, choic
         raise RuntimeError("database down")
 
     monkeypatch.setattr(db, "add_handoff", refuse)
-    with pytest.raises(RuntimeError):  # a 500: the seller never sees "Sent"
-        say(h, "yes")
+    assert lines(say(h, "yes")) == [{"type": "error", "message": "the message could not be answered, try again"}]
     assert demo._transcripts[h["X-Demo-Session"]][-1] == {"who": "vendor_guard", "text": chat.ASK_CONSENT}
-    assert not demo._busy and say(h, "operator").json()["reply"] == chat.ASK_CONSENT  # asked again
+    assert not demo._busy and said(h, "operator")["reply"] == chat.ASK_CONSENT  # asked again
 
 
-def test_d23_a_panel_check_joins_the_transcript_as_its_card_never_the_buyers_chat(api, llm_stub, demo_db, monkeypatch):
-    monkeypatch.setattr(demo, "OPERATOR_TOKEN", TOKEN)
-    h = start()
-    capture(api, httpx.Response(200, json=USD_PAID))
-    result = lines(client.post("/demo/api/check", json=CHECK, headers=h))[-1]
-    assert demo._transcripts[h["X-Demo-Session"]] == [{"who": "check_panel", "text": chat.card(result)}]
-    assert PAID not in json.dumps(demo._transcripts[h["X-Demo-Session"]])
-
-
-OPERATOR = [("GET", "/demo/api/operator/handoffs", None), ("POST", "/demo/api/operator/handoffs/1/reply", {"reply": "Hi"})]
+OPERATOR = [("GET", "/demo/api/operator/handoffs", None), ("POST", "/demo/api/operator/handoffs/1/reply", {"reply": "Hi"}),
+            ("POST", "/demo/api/operator/handoffs/1/close", None)]
 
 
 def test_d24_the_operator_api_needs_its_token_in_a_header(demo_db, monkeypatch):
@@ -405,16 +389,19 @@ def test_d24_the_operator_api_needs_its_token_in_a_header(demo_db, monkeypatch):
     monkeypatch.setattr(db, "answer_handoff", lambda hid, reply: called.append("answer"))
     for method, path, body in OPERATOR:  # no OPERATOR_TOKEN: there is no operator API
         assert client.request(method, path, json=body, headers={"X-Operator-Token": TOKEN}).status_code == 404
-    assert client.post("/demo/api/session").json()["operators"] is False
+    h = start()  # made without a token: the page asks the server each poll, never its saved session
+    state = client.get("/demo/api/state", headers=h).json()
+    assert state["operators"] is False and state["intro"] == chat.intro(False)
     monkeypatch.setattr(demo, "OPERATOR_TOKEN", TOKEN)
     for method, path, body in OPERATOR:
         for headers in ({}, {"X-Operator-Token": "x" * 40}):
             assert client.request(method, path, json=body, headers=headers).status_code == 401
         assert client.request(method, f"{path}?token={TOKEN}", json=body).status_code == 401  # never in a URL
-    assert not called and client.post("/demo/api/session").json()["operators"] is True
+    state = client.get("/demo/api/state", headers=h).json()
+    assert not called and state["operators"] is True and state["intro"] == chat.intro(True)  # what a reload shows
 
 
-def test_d25_a_persons_answer_reaches_the_seller_but_never_the_graph(demo_db, choice, monkeypatch):
+def test_d25_a_persons_answers_reach_the_seller_but_never_the_graph(demo_db, choice, monkeypatch):
     monkeypatch.setattr(demo, "OPERATOR_TOKEN", TOKEN)
     op, h = {"X-Operator-Token": TOKEN}, start()
     say(h, "operator")
@@ -424,16 +411,17 @@ def test_d25_a_persons_answer_reaches_the_seller_but_never_the_graph(demo_db, ch
     url = f"/demo/api/operator/handoffs/{shared['id']}/reply"
     assert client.post(url, json={"reply": "x" * 2001}, headers=op).status_code == 422
     for bad in (0, 2**63):  # out of bigint's range: a 422, never psycopg's 500
-        assert client.post(f"/demo/api/operator/handoffs/{bad}/reply", json={"reply": "Hi"}, headers=op).status_code == 422
-    answer = "Hi, Ana from Vendor Guard. Don't ship until PayPal shows the payment as Completed."
-    assert client.post(url, json={"reply": answer}, headers=op).json() == {"answered": True}
-    assert client.post(url, json={"reply": "again"}, headers=op).status_code == 409
+        for path, body in (("reply", {"reply": "Hi"}), ("close", None)):
+            assert client.post(f"/demo/api/operator/handoffs/{bad}/{path}", json=body, headers=op).status_code == 422
+    answers = ["Hi, Ana from Vendor Guard. Don't ship until PayPal shows the payment as Completed.", "Anything else?"]
+    for answer in answers:  # as many as they like: the conversation stays open
+        assert client.post(url, json={"reply": answer}, headers=op).json() == {"answered": True}
+    assert lines(say(h, "No, thanks Ana")) == [{"type": "relayed"}]
+    (shared,) = client.get("/demo/api/operator/handoffs", headers=op).json()
+    assert shared["transcript"][-3:] == [{"who": "operator", "text": answers[0]}, {"who": "operator", "text": answers[1]},
+                                         {"who": "seller", "text": "No, thanks Ana"}]
     assert client.get("/demo/api/state", headers=h).json()["handoffs"] == [
-        {"id": shared["id"], "status": "answered", "reply": answer}]
-    assert client.get("/demo/api/operator/handoffs", headers=op).json() == []
-    assert demo._transcripts[h["X-Demo-Session"]][-1] == {"who": "operator", "text": answer}
-    choice.intent = "other"
-    say(h, "thanks")
+        {"id": shared["id"], "status": "open", "replies": answers}]
     values = demo.chat_graph.get_state(demo._thread(h["X-Demo-Session"])).values
     assert "Ana" not in json.dumps(values, default=str) and all("Ana" not in c.user for c in choice.calls)
 
@@ -449,11 +437,11 @@ def test_d27_without_an_operator_token_no_person_is_offered_and_nothing_is_kept(
     monkeypatch.setattr(chat, "TAVILY_KEY", "")
     h = start()
     choice.intent = "question"
-    assert chat.OFFER_OPERATOR not in say(h, "Can I sell gift cards?").json()["reply"]
-    assert chat.DEMO_ONLY in say(h, "operator").json()["reply"]
-    assert chat.SHARED not in say(h, "yes").json()["reply"]
+    assert chat.OFFER_OPERATOR not in said(h, "Can I sell gift cards?")["reply"]
+    assert chat.DEMO_ONLY in said(h, "operator")["reply"]
+    assert chat.SHARED not in said(h, "yes")["reply"]
     capture(api, httpx.Response(200, json=USD_PAID))
-    lines(client.post("/demo/api/check", json=CHECK, headers=h))
+    check_in_chat(h)
     assert h["X-Demo-Session"] not in demo._transcripts and not demo_db[h["X-Demo-Session"]]["handoffs"]
 
 
@@ -467,3 +455,109 @@ def test_d28_ten_wrong_operator_tokens_lock_the_address_out(demo_db, monkeypatch
         assert client.get(path, headers={"X-Operator-Token": "x" * 40}).status_code == 401
     r = client.get(path, headers={"X-Operator-Token": TOKEN})  # refused before the compare: a guess learns nothing
     assert r.status_code == 429 and "wrong tokens" in r.json()["detail"]
+
+
+def test_d29_vendor_guard_speaks_first(demo_db, choice, monkeypatch):
+    s = client.post("/demo/api/session").json()
+    assert s["intro"] == chat.intro(False)  # no OPERATOR_TOKEN: no person is offered
+    assert demo.chat_graph.get_state(demo._thread(s["session_id"])).values["greeted"] is True
+    choice.intent = "other"
+    assert said({"X-Demo-Session": s["session_id"]}, "Hi")["reply"] == chat.SCOPE  # not the intro again
+    monkeypatch.setattr(demo, "OPERATOR_TOKEN", TOKEN)
+    s = client.post("/demo/api/session").json()
+    assert s["intro"] == chat.intro(True) and s["intro"].endswith(chat.PERSON)
+    assert s["session_id"] not in demo._transcripts  # fixed text, nothing of the seller's: never shared
+
+
+def test_d30_while_a_person_has_the_conversation_vendor_guard_never_answers(demo_db, choice, monkeypatch):
+    monkeypatch.setattr(demo, "OPERATOR_TOKEN", TOKEN)
+    monkeypatch.setattr(scam_check, "run", lambda *args: pytest.fail("no check while a person has it"))
+    h = start()
+    say(h, "operator")
+    say(h, "yes")
+    thread = demo._thread(h["X-Demo-Session"])
+    before, calls = demo.chat_graph.get_state(thread).config, len(choice.calls)
+    for message in ("operator", "check", "45.00 USD", "Buyer: paid"):  # no model, no check, nothing awaited
+        assert lines(say(h, message)) == [{"type": "relayed"}]
+    assert lines(say(h, "", "iVBORw0KGgoAAAAAAAAAAA==")) == [{"type": "relayed"}]  # a screenshot isn't passed on
+    assert demo.chat_graph.get_state(thread).config == before and len(choice.calls) == calls
+    (row,) = demo_db[h["X-Demo-Session"]]["handoffs"]
+    assert row["transcript"][-5:] == [{"who": "seller", "text": t} for t in
+                                      ("operator", "check", "45.00 USD", "Buyer: paid", "[screenshot, not read]")]
+
+
+@pytest.mark.parametrize("closer", ["operator", "seller"])
+def test_d31_closing_deletes_what_the_person_saw_and_starts_the_chat_over(demo_db, choice, monkeypatch, closer):
+    monkeypatch.setattr(demo, "OPERATOR_TOKEN", TOKEN)
+    monkeypatch.setattr(chat, "TAVILY_KEY", "")
+    op, h = {"X-Operator-Token": TOKEN}, start()
+    sid = h["X-Demo-Session"]
+    assert client.post("/demo/api/handoff/close", headers=h).status_code == 409  # nothing shared yet
+    choice.intent = "question"
+    say(h, "Can I sell gift cards?")
+    say(h, "operator")
+    say(h, "yes")
+    (shared,) = client.get("/demo/api/operator/handoffs", headers=op).json()
+    client.post(f"/demo/api/operator/handoffs/{shared['id']}/reply", json={"reply": "Hi"}, headers=op)
+    close = ((f"/demo/api/operator/handoffs/{shared['id']}/close", op) if closer == "operator"
+             else ("/demo/api/handoff/close", h))
+    assert client.post(close[0], headers=close[1]).json() == {"closed": True}
+    assert client.post(close[0], headers=close[1]).status_code == 409
+    assert client.post(f"/demo/api/operator/handoffs/{shared['id']}/reply", json={"reply": "late"},
+                       headers=op).status_code == 409
+    assert client.get("/demo/api/operator/handoffs", headers=op).json() == []
+    (row,) = demo_db[sid]["handoffs"]
+    assert row["transcript"] == [] and row["last_case"] is None  # what the person saw is deleted
+    assert client.get("/demo/api/state", headers=h).json()["handoffs"] == [
+        {"id": shared["id"], "status": "closed", "replies": ["Hi"], "notice": f"{chat.CLOSED}\n\n{chat.intro(True)}"}]
+    monkeypatch.setattr(demo, "OPERATOR_TOKEN", "")  # restarted without it: the notice no longer says "say operator"
+    assert client.get("/demo/api/state", headers=h).json()["handoffs"][0]["notice"] == f"{chat.CLOSED}\n\n{chat.intro(False)}"
+    monkeypatch.setattr(demo, "OPERATOR_TOKEN", TOKEN)
+    assert sid not in demo._transcripts and demo.chat_graph.get_state(demo._thread(sid)).values == {
+        "messages": [], "greeted": True}  # as a new session's
+    choice.intent = "other"
+    assert said(h, "Hi")["reply"] == chat.SCOPE  # Vendor Guard answers again; greeted, by the notice
+    assert demo._transcripts[sid] == [{"who": "seller", "text": "Hi"}, {"who": "vendor_guard", "text": chat.SCOPE}]
+
+
+@pytest.mark.parametrize("cut", ["the page goes away", "storing the case fails"])
+def test_d32_a_check_cut_short_is_still_saved_in_the_chat(api, llm_stub, demo_db, choice, monkeypatch, cut):
+    """PayPal's claim took the payment: the thread must leave the chat step, or the chat sent again gets "already
+    used"."""
+    capture(api, httpx.Response(200, json=USD_PAID))
+    h = start()
+    sid = h["X-Demo-Session"]
+    said(h, "check")
+    said(h, "45.00 USD")
+    if cut == "the page goes away":  # nobody reads the stream: the message's thread runs on its own
+        main.demo_chat(main.ChatIn(message=PAID), Request({"type": "http", "headers": [], "client": ("1.1.1.1", 0)}), sid)
+        deadline = time.monotonic() + 10
+        while demo._busy and time.monotonic() < deadline:
+            time.sleep(0.01)
+    else:
+        monkeypatch.setattr(db, "add_demo_case", lambda *args: 1 / 0)
+        assert lines(say(h, PAID))[-1] == {"type": "error", "message": "the message could not be answered, try again"}
+    values = demo.chat_graph.get_state(demo._thread(sid)).values
+    assert not demo._busy and values["awaiting"] is None and values["last_case"]["policy_id"] == "P.VERIFIED"
+    if cut == "the page goes away":
+        assert demo_db[sid]["cases"] == [values["last_case"]["case_id"]]  # so ending the session deletes it
+
+
+def test_d33_the_persons_close_closes_only_the_card_they_clicked(demo_db, choice, monkeypatch):
+    monkeypatch.setattr(demo, "OPERATOR_TOKEN", TOKEN)
+    op, h = {"X-Operator-Token": TOKEN}, start()
+    sid = h["X-Demo-Session"]
+    say(h, "operator")
+    say(h, "yes")
+    (old,) = client.get("/demo/api/operator/handoffs", headers=op).json()
+    client.post("/demo/api/handoff/close", headers=h)  # the seller stops sharing, then shares again
+    say(h, "operator")
+    say(h, "yes")
+    (new,) = client.get("/demo/api/operator/handoffs", headers=op).json()
+    monkeypatch.setattr(db, "open_handoff_session", lambda hid: sid)  # the old card, looked up just before
+    assert client.post(f"/demo/api/operator/handoffs/{old['id']}/close", headers=op).status_code == 409
+    assert [r["status"] for r in demo_db[sid]["handoffs"]] == ["closed", "open"]
+    demo._busy.add(sid)  # a message of the seller's on its way
+    r = client.post(f"/demo/api/operator/handoffs/{new['id']}/close", headers=op)
+    demo._busy.discard(sid)
+    assert (r.status_code, r.json()["detail"]) == (409, "the seller's last message is still on its way, try again in a moment")

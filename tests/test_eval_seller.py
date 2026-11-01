@@ -30,7 +30,7 @@ import pytest
 from langgraph.checkpoint.memory import InMemorySaver
 from pydantic import BaseModel, ConfigDict
 
-from app import chat, db, llm, output_guardrails
+from app import chat, db, llm, output_guardrails, scam_check
 from tests.test_eval_output_guardrails import ENV, KEY, KEY_NAME, calls, real_llm, save_results  # noqa: F401  (pytest fixtures)
 from tests.test_scam_check import TID, days_ago, search
 
@@ -139,6 +139,8 @@ def kpis(rows) -> str:
         rate("  fallback", [not a["grounded"] for a in answers]),
         f"{'  grounded sentences per reply':<32}"
         + (f"{sum(a['sentences'] for a in grounded) / len(grounded):.2f}" if grounded else "-"),
+        "check explanation, per check:",
+        rate("  template, not the LLM", [t.get("template") for t in turns]),
         "judge, per conversation:",
         *(rate(f"  {c}", [j[c] for j in judged]) for c in CRITERIA),
         f"{'  mean score (1-5)':<32}{sum(j['score'] for j in judged) / len(judged):.2f}" if judged else "",
@@ -196,15 +198,16 @@ def test_eval_seller(api, monkeypatch, calls, i, rep):
     used = iter(inputs["already_used"]) if isinstance(inputs["already_used"], list) else repeat(inputs["already_used"])
     monkeypatch.setattr(db, "claim_payment", lambda *args: not next(used))  # a list: one per claim, in order
     config = {"configurable": {"thread_id": f"seller-{i}-{rep}"}}
-    ran, checked = [], []  # each answer step's result, and each check_answer's (sentences, errors)
-    grounded_, check_answer = chat._grounded, output_guardrails.check_answer
+    ran, checked, explained = [], [], []  # each answer step's result, each check_answer's (sentences, errors), each check's
+    grounded_, check_answer, run_ = chat._grounded, output_guardrails.check_answer, scam_check.run
     monkeypatch.setattr(chat, "_grounded", lambda *args: ran.append(r := grounded_(*args)) or r)
+    monkeypatch.setattr(scam_check, "run", lambda *args: explained.append(o := run_(*args)) or o)
     monkeypatch.setattr(output_guardrails, "check_answer",
                         lambda *args: checked.append((len(args[0]), e := check_answer(*args))) or e)
     turns, judge, error = [], None, None
     try:
         for say, expected in zip(inputs["turns"], want["turns"]):
-            n_ran, n_checked = len(ran), len(checked)
+            n_ran, n_checked, n_explained = len(ran), len(checked), len(explained)
             nodes = [node for update in GRAPH.stream({"messages": [{"role": "user", "content": say}]}, config,
                                                      stream_mode="updates") for node in update] or [None]
             values = GRAPH.get_state(config).values
@@ -219,7 +222,10 @@ def test_eval_seller(api, monkeypatch, calls, i, rep):
             shown = lambda keys: [chat.VERIFIED[k]["title"] in reply for k in keys]  # noqa: E731
             sentences, rejected = checked[-1] if len(checked) > n_checked else (0, ["LLM or schema error"])
             answer = {"grounded": ran[-1] is not None, "sentences": sentences, "rejected": rejected} if len(ran) > n_ran else None
-            turns.append({"say": say, "reply": reply, "route": nodes[-1], "expected": expected, "answer": answer, "checks": {
+            # RECHECK #25: True when the check's explanation is the template, not the LLM's
+            template = explained[-1]["template"] if len(explained) > n_explained else None
+            turns.append({"say": say, "reply": reply, "route": nodes[-1], "expected": expected, "answer": answer,
+                          "template": template, "checks": {
                 "route": nodes[-1] in routes,
                 # "notes" must be shown, "no_notes" must not: a stale verdict, an injected pick
                 "notes": all(shown(expected.get("notes", []))) and not any(shown(expected.get("no_notes", [])))

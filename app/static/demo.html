@@ -71,20 +71,6 @@
   .note.bad { color: var(--scam); }
   .note:empty { display: none; }
 
-  /* the verdict */
-  .result { margin-top: 20px; border-top: 1px solid var(--rule); padding-top: 18px; }
-  .result:empty { display: none; }
-  .stamp { display: inline-block; border: 4px double currentColor; border-radius: 4px; padding: 6px 16px; font-weight: 800; font-size: 26px; letter-spacing: .08em; text-transform: uppercase; transform: rotate(-4deg); margin: 4px 0 14px 4px; animation: press .28s ease-out; }
-  @keyframes press { from { transform: rotate(-4deg) scale(1.35); opacity: 0; } to { transform: rotate(-4deg) scale(1); opacity: 1; } }
-  @media (prefers-reduced-motion: reduce) { .stamp { animation: none; } }
-  .v-VERIFIED { color: var(--verified); }
-  .v-VERIFIED_WITH_WARNINGS { color: var(--warn); }
-  .v-WAIT { color: var(--wait); }
-  .v-SCAM_LIKELY { color: var(--scam); }
-  .message { font-size: 18px; font-weight: 500; margin: 0 0 12px; max-width: 60ch; }
-  .sentences { margin: 0 0 12px; padding-left: 20px; }
-  .sentences li { margin-bottom: 4px; }
-  .src { color: var(--muted); font-size: 13px; margin-left: 4px; }
   .caveat { font-size: 14px; color: var(--muted); margin: 6px 0 0; }
 
   /* behind the scenes */
@@ -104,7 +90,6 @@
   .rail li.skipped::before { border-style: dashed; }
   .log { list-style: none; margin: 0; padding: 8px 22px 18px; overflow-y: auto; flex: 1; min-height: 220px; }
   .log li { border-bottom: 1px solid var(--rule); padding: 9px 0; font-size: 15px; overflow-wrap: anywhere; }
-  input[type=file] { max-width: 100%; font-size: 14px; }
   .log li.divider { border: 0; padding: 14px 0 2px; font-weight: 700; }
   .log .who { display: inline-block; min-width: 9ch; font-size: 13px; font-weight: 700; }
   .who.paypal { color: var(--pen); }
@@ -175,26 +160,12 @@
       </section>
 
       <section class="step" aria-labelledby="s3">
-        <h2 id="s3"><span class="n">3</span> Check the buyer's chat</h2>
-        <p>Pick a chat to start from, edit it if you like, or add a screenshot. Vendor Guard checks it against PayPal.</p>
-        <div class="chips" id="scenarios"></div>
-        <form id="check">
-          <div class="field"><label for="chat">The buyer's chat</label><textarea id="chat" maxlength="8000" placeholder="Paste a buyer's messages here, or pick a chat above."></textarea></div>
-          <div class="row">
-            <div class="field"><label for="expected">Your price</label><div class="suffix"><input id="expected" type="number" min="0.01" step="0.01" value="45.00"><span>USD</span></div></div>
-            <div class="field"><label for="shot">Screenshot (optional, PNG or JPEG)</label><input id="shot" type="file" accept="image/png,image/jpeg"></div>
-          </div>
-          <button class="btn" id="run" type="submit">Check this chat</button>
-          <p class="note" id="check-note" role="status"></p>
-        </form>
-        <div class="result" id="result" aria-live="polite"></div>
-      </section>
-
-      <section class="step" aria-labelledby="s4">
-        <h2 id="s4">Ask Vendor Guard</h2>
-        <p>Questions about selling with PayPal, answered from notes checked against PayPal's own pages. You can also type check to verify a payment here, step by step.</p>
+        <h2 id="s3"><span class="n">3</span> Ask Vendor Guard</h2>
+        <p>Questions about selling with PayPal, answered from notes checked against PayPal's own pages. To check a payment, pick a buyer's chat below or type check: each step of the check lights up on the right as it runs.</p>
         <div class="chips" id="asks"></div>
+        <div class="chips" id="scenarios" role="group" aria-label="Buyer's chats to check"></div>
         <ol class="talk" id="talk" aria-live="polite"></ol>
+        <p class="note" id="with-person" hidden>A person from Vendor Guard has this conversation: your messages go to them, and Vendor Guard doesn't answer. <button class="btn quiet" id="stop-sharing" type="button">Stop sharing</button></p>
         <form class="ask" id="ask">
           <label class="sr-only" for="message">Your message</label>
           <textarea id="message" maxlength="8000" placeholder="Ask a question, or type check"></textarea>
@@ -210,7 +181,7 @@
         <p>For Vendor Guard's team: the conversations sellers chose to share, from every demo session, each with an answer box. Paste the operator token to see them. It stays in this tab's memory only.</p>
         <form class="ask" id="op-login">
           <label class="sr-only" for="op-token">Operator token</label>
-          <input id="op-token" type="password" autocomplete="off" placeholder="Operator token">
+          <input id="op-token" type="text" autocomplete="off" spellcheck="false" placeholder="Operator token">
           <button class="btn" type="submit">Open</button>
         </form>
         <p class="note" id="op-note" role="status"></p>
@@ -245,8 +216,6 @@ const NODES = [
   ["safe_template", "Falls back to fixed sentences"],
   ["persist_case", "Saves the case"],
 ];
-const CONTACT_PAYPAL = "https://www.paypal.com/us/cshelp/contact-us";  // as scam_check.CONTACT_PAYPAL (test U16)
-const VERDICT = {VERIFIED: "Verified", VERIFIED_WITH_WARNINGS: "Verified, with warnings", WAIT: "Wait", SCAM_LIKELY: "Likely scam"};
 const $ = (id) => document.getElementById(id);
 let session = null;
 let lastSale = null;  // {item, amount, capture_id}
@@ -370,10 +339,8 @@ function renderButtons() {
         const cap = await (await api(`/demo/api/orders/${encodeURIComponent(data.orderID)}/capture`, {})).json();
         log("PayPal", "paypal", `Payment captured: ${cap.status}, ${cap.amount} ${cap.currency}`, cap);
         lastSale = {...lastSale, capture_id: cap.capture_id};
-        note("pay-note", `Paid. PayPal's transaction ID is ${cap.capture_id}. Now check a chat in step 3.`);
-        $("expected").value = lastSale.amount;
+        note("pay-note", `Paid. PayPal's transaction ID is ${cap.capture_id}. Now pick a buyer's chat in step 3.`);
         scenarios();
-        pickScenario("legit");
         refresh();
       } catch (e) {
         if (!(e instanceof Ended)) note("pay-note", e.message, true);
@@ -394,6 +361,7 @@ async function refresh() {
   if (!session) return;
   let state;
   try { state = await (await api("/demo/api/state")).json(); } catch { return; }
+  $("operator").hidden = !state.operators;
   $("sales").replaceChildren(...state.sales.map((s) => el("li", {},
     el("span", {}, s.item), el("span", {}, `${s.amount} USD`),
     s.capture_id ? el("span", {}, "Transaction ", el("code", {}, s.capture_id), ` ${s.capture_status} `,
@@ -405,12 +373,25 @@ async function refresh() {
     seenEvents.add(e.id);
     log("Webhook", "webhook", `${e.event_type}, signature verified by PayPal. ${e.summary || ""}`, e);
   }
-  for (const h of state.handoffs || []) {  // a person's answer: shown once, apart from Vendor Guard's replies
-    if (!h.reply || seenReplies.has(h.id)) continue;
-    seenReplies.add(h.id);
-    bubble("op", `Operator: ${h.reply}`);
-    log("Operator", "operator", "A person from Vendor Guard answered the conversation you shared.", h);
+  // a person's answers, then the notice that the chat started over: each once, apart from Vendor Guard's replies.
+  // Only for a handoff this page saw open: after a reload, the closed ones are an earlier chat's
+  for (const h of state.handoffs) {
+    if (h.status === "open") seenOpen.add(h.id);
+    if (!seenOpen.has(h.id)) continue;
+    h.replies.forEach((reply, i) => {
+      if (seenReplies.has(`${h.id}:${i}`)) return;
+      seenReplies.add(`${h.id}:${i}`);
+      bubble("op", `Operator: ${reply}`);
+      log("Operator", "operator", "A person from Vendor Guard answered.", reply);
+    });
+    if (h.notice && !seenReplies.has(`${h.id}:closed`)) {
+      seenReplies.add(`${h.id}:closed`);
+      awaiting = null;
+      bubble("vg", h.notice);
+      log("Operator", "operator", "The shared conversation closed: Vendor Guard forgot this chat and started over.");
+    }
   }
+  $("with-person").hidden = !state.handoffs.some((h) => h.status === "open");
 }
 
 // a PNG of a real sandbox capture, to test screenshots in step 3. Labelled as the demo's: no PayPal branding.
@@ -438,7 +419,7 @@ function receipt(s, who) {
   el("a", {href: c.toDataURL("image/png"), download: `receipt-${who}-${s.capture_id}.png`}).click();
 }
 
-// ---- step 3: scenarios ----
+// ---- step 3: buyer's chats to check ----
 function fakeId() {
   const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ0123456789";
   let id = String(1 + Math.floor(Math.random() * 9));
@@ -461,18 +442,30 @@ const SCENARIOS = {
 function scenarios() {
   $("scenarios").replaceChildren(...Object.entries(SCENARIOS).map(([key, s]) => {
     const locked = s.real && !lastSale?.capture_id;
-    return el("button", {class: "chip", type: "button", onclick: () => pickScenario(key),
+    return el("button", {class: "chip", type: "button", onclick: () => prepare(key),
                          ...(locked ? {disabled: "", title: "Pay for a sale first: this chat uses its real transaction ID"} : {})}, s.label);
   }));
 }
 
-function pickScenario(key) {
+// a buyer's chat prepares a check: "check" and the price are sent for you, then the chat waits in the box, to edit or
+// send. ponytail: after a reload awaiting is unknown, so mid-check a click sends "check" as the buyer's chat; return
+// awaiting from /demo/api/state if that matters
+async function prepare(key) {
+  if (sending) return;
+  // "check" would answer the question, or go to the person
+  if (awaiting === "consent") return note("ask-note", "Answer the question about sharing first: yes, or anything else to keep it to yourself.", true);
+  if (!$("with-person").hidden) return note("ask-note", "A person from Vendor Guard has this conversation. To check a buyer's chat with Vendor Guard, press Stop sharing.", true);
   const base = lastSale || {item: $("item").value.trim() || "item", amount: Number($("price").value || 45).toFixed(2)};
-  $("chat").value = SCENARIOS[key].text(base);
-  $("expected").value = base.amount;
+  if (awaiting !== "chat") {
+    if (awaiting !== "price" && (await send("check", false))?.awaiting !== "price") return;
+    if ((await send(`${base.amount} USD`, false))?.awaiting !== "chat") return;
+  }
+  $("message").value = SCENARIOS[key].text(base);
+  $("message").focus();
+  note("ask-note", "The buyer's chat is in the box: edit it if you like, then press Send.");
 }
 
-// ---- step 3: the check, streamed ----
+// ---- a check's steps, streamed with the chat's reply ----
 function readImage(file) {
   return new Promise((resolve, reject) => {
     const r = new FileReader();
@@ -506,7 +499,13 @@ function describe(node, u) {
   }
 }
 
+let checking = false;  // a check's steps are on the rail
 function onLine(msg) {
+  if (!checking && (msg.type === "paypal" || msg.type === "node")) {  // the check's first step
+    checking = true;
+    rail("running");
+    divider(`Check at ${new Date().toLocaleTimeString()}`);
+  }
   if (msg.type === "paypal") {
     const q = msg.params ? `?transaction_id=${msg.params.transaction_id || ""}` : "";
     log("PayPal", "paypal", `${msg.method} ${msg.path}${q} → ${msg.status}`, msg.body);
@@ -515,92 +514,30 @@ function onLine(msg) {
     const warned = (msg.node === "detect_signals" && msg.update.signals === null) || (msg.node === "validate_output" && msg.update.guardrail_errors.length);
     mark(msg.node, warned ? "warned" : "done");
     log({paypal: "PayPal", llm: "Model", error: "Guard", graph: "Graph"}[cls], cls, text, msg.update);
-  } else if (msg.type === "result") {
-    for (const [name] of NODES) if ($(`node-${name}`).className === "running") mark(name, "skipped");
-    showResult(msg);
   } else if (msg.type === "error") {
-    for (const [name] of NODES) if ($(`node-${name}`).className === "running") mark(name, "skipped");
     log("Error", "error", msg.message);
-    note("check-note", msg.message, true);
   }
 }
 
-function showResult(r) {
-  const cls = `v-${r.verdict}`;
-  const evidence = Object.entries(r.evidence).filter(([id]) => id !== "E1").map(([id, e]) =>
-    el("li", {}, `${e.label}: “${e.quote}”`, el("span", {class: "src"}, `[${id}${e.confirmed === "yes" ? "" : ", quote not found in the chat"}]`)));
-  $("result").replaceChildren(...[  // filtered: replaceChildren would print a null as "null"
-    el("div", {class: `stamp ${cls}`}, VERDICT[r.verdict] || r.verdict),
-    el("p", {class: "message"}, r.message),
-    el("ul", {class: "sentences"}, r.sentences.map((s) => el("li", {}, s.text, el("span", {class: "src"}, `[${s.sources.join(", ")}]`)))),
-    evidence.length ? el("div", {}, el("b", {}, "Warning signs in the chat"), el("ul", {class: "sentences"}, evidence)) : null,
-    el("div", {}, el("b", {}, "What to do"), el("ol", {class: "sentences"}, r.steps.map((s) => el("li", {}, s)))),
-    el("p", {}, "Still unsure? Vendor Guard can't act on a payment, but PayPal can. ",
-      el("a", {href: CONTACT_PAYPAL, target: "_blank", rel: "noopener"}, "Contact PayPal")),
-    r.template ? el("p", {class: "caveat"}, "These are fixed sentences: the model's explanation didn't pass the evidence checks.") : null,
-    r.signals_checked ? null : el("p", {class: "caveat"}, "The chat could not be checked for scam patterns, so this verdict leans on PayPal alone."),
-    el("p", {class: "caveat"}, `Case ${r.case_id}.`),
-  ].filter(Boolean));
+function checked() {  // a step still running when the check ended never ran
+  if (checking) for (const [name] of NODES) if ($(`node-${name}`).className === "running") mark(name, "skipped");
+  checking = false;
 }
 
-// fills the price from the screenshot, never checks with it: a receipt shows what was paid, not what the seller asked
-async function suggestPrice(file) {
-  $("run").disabled = true;
-  note("check-note", "No price yet: reading the amount in the screenshot…");
-  try {
-    const p = await (await api("/demo/api/price", {image: await readImage(file)})).json();
-    if (p.currency === "USD") {
-      $("expected").value = p.amount;
-      note("check-note", `The screenshot says ${p.amount} USD. Is that the price you asked for? Change it if not, then check.`);
-    } else {
-      note("check-note", p.amount ? `The screenshot says ${p.amount} ${p.currency}, and this demo checks USD only. Enter the price you asked for.`
-        : "I couldn't find one amount in the screenshot. Enter the price you asked for.", true);
+async function lines(r, each) {  // NDJSON: each line's object, as it arrives
+  const reader = r.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  for (;;) {
+    const {value, done} = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, {stream: true});
+    let i;
+    while ((i = buffer.indexOf("\n")) >= 0) {
+      const line = buffer.slice(0, i);
+      buffer = buffer.slice(i + 1);
+      if (line.trim()) each(JSON.parse(line));
     }
-  } catch (e) {
-    if (!(e instanceof Ended)) note("check-note", e.message, true);
-  } finally {
-    $("run").disabled = false;
-  }
-}
-
-async function check(event) {
-  event.preventDefault();
-  note("check-note", "");
-  const text = $("chat").value;
-  const file = $("shot").files[0];
-  const expected = Number($("expected").value);
-  if (!text.trim() && !file) return note("check-note", "Paste a chat or add a screenshot first.", true);
-  if (file && file.size > 3_000_000) return note("check-note", "The screenshot must be under 3 MB.", true);
-  if (!(expected > 0) && file) return suggestPrice(file);
-  if (!(expected > 0)) return note("check-note", "Enter the price you asked for.", true);
-  $("run").disabled = true;
-  $("result").replaceChildren();
-  rail("running");
-  divider(`Check at ${new Date().toLocaleTimeString()}`);
-  try {
-    const body = {text, expected_amount: expected.toFixed(2), expected_currency: "USD"};
-    if (file) body.image = await readImage(file);
-    const r = await api("/demo/api/check", body);
-    const reader = r.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = "";
-    for (;;) {
-      const {value, done} = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, {stream: true});
-      let i;
-      while ((i = buffer.indexOf("\n")) >= 0) {
-        const line = buffer.slice(0, i);
-        buffer = buffer.slice(i + 1);
-        if (line.trim()) onLine(JSON.parse(line));
-      }
-    }
-  } catch (e) {
-    if (e instanceof Ended) return;
-    rail();
-    note("check-note", e.message, true);
-  } finally {
-    if ($("run")) $("run").disabled = false;
   }
 }
 
@@ -619,31 +556,54 @@ const ROUTES = {question: "answered a question", start_check: "started a check",
                 dispute: "explained disputes", other: "introduced itself", advise: "advised on next steps",
                 handoff: "handled a request for a person"};
 
-let sending = false;  // one message at a time, as the server asks (409)
-async function send(message) {
-  const file = $("ask-shot").files[0];
-  if (sending || (!message.trim() && !file)) return;
-  if (file && file.size > 3_000_000) return note("ask-note", "The screenshot must be under 3 MB.", true);
+let sending = false;  // one message at a time, as the server asks
+let awaiting = null;  // the check's step after the last reply: "price", "chat" or null
+// one message: its reply, with a check's steps on the rail as they run (main.demo_chat), or null when none came.
+// typed: from the box, with its screenshot; prepare()'s words leave the box and the screenshot alone
+async function send(message, typed = true) {
+  const file = typed ? $("ask-shot").files[0] : undefined;
+  if (sending || (!message.trim() && !file)) return null;
+  if (file && file.size > 3_000_000) { note("ask-note", "The screenshot must be under 3 MB.", true); return null; }
   sending = true;
   note("ask-note", "");
+  // a person may have closed it since the last poll: the notice, and the chat starting over, come before this message
+  if (!$("with-person").hidden) await refresh();
   bubble("me", file ? `📎 ${file.name}${message ? `\n${message}` : ""}` : message);
-  $("message").value = "";
-  $("ask-shot").value = "";
+  if (typed) {
+    $("message").value = "";
+    $("ask-shot").value = "";
+  }
   $("send").disabled = true;
+  let r = null, error = null;
   try {
     const body = {message};
     if (file) body.image = await readImage(file);
-    const r = await (await api("/demo/api/chat", body)).json();
+    await lines(await api("/demo/api/chat", body), (msg) => {
+      if (msg.type === "reply" || msg.type === "relayed") r = msg;
+      else onLine(msg);
+      if (msg.type === "error") error = msg.message;
+    });
+    if (!r) throw new Error(error || "The answer didn't arrive. Send your message again.");  // a cut stream too
+    if (r.type === "relayed") {
+      log("Chat", "operator", "sent your message to the person from Vendor Guard. No model call: Vendor Guard doesn't answer while they have the conversation.", r);
+      return r;
+    }
+    if (r.route === "handoff") refresh();  // a yes opened one: seen open now, not at the next poll
     bubble("vg", r.reply);
+    awaiting = r.awaiting;
     const how = r.intent ? `The model picked “${r.intent}”${r.notes.length ? ` and the notes ${r.notes.join(", ")}` : ""}; the reply is written by code.` : "No model call: the code routed it.";
-    const ran = r.route === "check" && !r.awaiting && /^Case /m.test(r.reply) ? " It ran scam_check: use step 3 to watch a check's PayPal calls." : "";
-    const what = r.intent === "not_paypal" ? "said it works with PayPal only" : ROUTES[r.route] || r.route;
+    const ran = checking ? " It ran scam_check: its steps are above." : "";
+    const what = r.intent === "not_paypal" ? "said it works with PayPal only"
+      : r.intent === "topics" ? "listed what it has notes on" : ROUTES[r.route] || r.route;
     log("Chat", "llm", `${what}. ${how}${ran}`, r);
+    return r;
   } catch (e) {
-    if (e instanceof Ended) return;
+    if (e instanceof Ended) return null;
     note("ask-note", e.message, true);
-    if (!$("message").value) $("message").value = message;  // a busy or refused message can be sent again
+    if (typed && !$("message").value) $("message").value = message;  // a busy or refused message can be sent again
+    return null;
   } finally {
+    checked();
     sending = false;
     if ($("send")) $("send").disabled = false;
   }
@@ -651,11 +611,12 @@ async function send(message) {
 
 // ---- the operator: a person from Vendor Guard answers what sellers shared, from every session ----
 let operatorToken = "";  // this tab's memory only, sent in a header and never in a URL: a reload asks for it again
-const cards = new Map();  // handoff id -> shared_at on screen, so the polling never wipes a draft answer
+const cards = new Map();  // handoff id -> updated_at on screen: the polling redraws only a changed conversation
 let polled = "";  // the note the poll wrote last, taken back by a later poll if nothing wrote over it
-const seenReplies = new Set();  // operator answers already in this page's chat
+const seenOpen = new Set();  // the seller's handoffs this page saw open
+const seenReplies = new Set();  // "id:n" operator answers and "id:closed" notices already in this page's chat
 const IMAGE = /^data:image\/(png|jpeg);base64,[A-Za-z0-9+/=]+$/;  // what the server stores; anything else isn't shown
-const WHO = {seller: "Seller", vendor_guard: "Vendor Guard", check_panel: "Check panel", operator: "Operator"};
+const WHO = {seller: "Seller", vendor_guard: "Vendor Guard", operator: "Operator"};
 
 async function operatorApi(path, body) {  // not api(): a 401 here is a wrong token, not an ended session
   const token = operatorToken;
@@ -676,30 +637,45 @@ function caseLine(c) {
 }
 
 // the transcript holds the buyer's untrusted text: text nodes only, and an image only as a PNG or JPEG data: URL
-function card(h) {
-  const answer = el("textarea", {maxlength: "2000", placeholder: "Your answer to the seller", "aria-label": "Your answer to the seller"});
-  const send = el("button", {class: "btn", type: "submit"}, "Answer");
-  const item = el("li", {"data-id": String(h.id)},
+function shared(h) {  // the conversation as it stands, redrawn when it changes; the answer box below it stays
+  return el("div", {class: "shared"},
     el("p", {class: "caveat"}, `Shared at ${new Date(h.shared_at).toLocaleTimeString()}. `,
       h.last_case ? `Last check: ${caseLine(h.last_case)}.` : "No check yet."),
     el("ol", {class: "talk"}, h.transcript.map((t) => el("li", {class: {seller: "me", operator: "op"}[t.who] || "vg"},
       el("b", {}, `${WHO[t.who] || t.who}: `), t.text,
-      typeof t.image === "string" && IMAGE.test(t.image) ? el("img", {src: t.image, alt: "The screenshot the seller sent"}) : null))),
+      typeof t.image === "string" && IMAGE.test(t.image) ? el("img", {src: t.image, alt: "The screenshot the seller sent"}) : null))));
+}
+
+function card(h) {
+  const answer = el("textarea", {maxlength: "2000", placeholder: "Your answer to the seller", "aria-label": "Your answer to the seller"});
+  const send = el("button", {class: "btn", type: "submit"}, "Answer");
+  const close = el("button", {class: "btn quiet", type: "button", onclick: async () => {
+    if (!confirm("Close this conversation? What you see here is deleted, and the seller's chat with Vendor Guard starts over.")) return;
+    try {
+      await operatorApi(`/demo/api/operator/handoffs/${h.id}/close`, {});
+      item.remove();
+      cards.delete(h.id);
+      note("op-note", "Closed. The seller's chat started over.");
+    } catch (err) {
+      note("op-note", err.message, true);
+    }
+  }}, "Close");
+  const item = el("li", {"data-id": String(h.id)}, shared(h),
     el("form", {class: "ask", onsubmit: async (e) => {
       e.preventDefault();
       if (!answer.value.trim()) return;
-      send.disabled = true;  // a double click sends once, not a second time into a 409
+      send.disabled = true;  // a double click sends once, not twice
       try {
         await operatorApi(`/demo/api/operator/handoffs/${h.id}/reply`, {reply: answer.value.trim()});
-        item.remove();
-        cards.delete(h.id);
+        answer.value = "";
         note("op-note", "Sent. The seller sees it in their chat.");
+        refreshOperator();
       } catch (err) {
         note("op-note", err.message, true);
       } finally {
         send.disabled = false;
       }
-    }}, answer, send));
+    }}, answer, send, close));
   return item;
 }
 
@@ -712,12 +688,13 @@ async function refreshOperator() {
     if (!ids.has(Number(li.dataset.id))) { li.remove(); cards.delete(Number(li.dataset.id)); }
   }
   for (const h of open) {
-    if (cards.get(h.id) === h.shared_at) continue;  // unchanged: the draft answer stays
+    if (cards.get(h.id) === h.updated_at) continue;
     const old = $("handoffs").querySelector(`[data-id="${h.id}"]`);
-    const fresh = card(h);
-    fresh.querySelector("textarea").value = old?.querySelector("textarea").value || "";
-    old ? old.replaceWith(fresh) : $("handoffs").append(fresh);
-    cards.set(h.id, h.shared_at);
+    const item = old || $("handoffs").appendChild(card(h));
+    if (old) old.querySelector(".shared").replaceWith(shared(h));  // the draft answer and its focus stay
+    const talk = item.querySelector(".talk");
+    talk.scrollTop = talk.scrollHeight;  // the newest message in view
+    cards.set(h.id, h.updated_at);
   }
   if (!open.length) note("op-note", polled = "No shared conversations are waiting.");
   else if ($("op-note").textContent === polled) note("op-note", polled = "");  // no longer true; "Sent." stays
@@ -738,17 +715,19 @@ async function start() {
   rail();
   scenarios();
   session = stored();
-  if (session) {
-    try { await api("/demo/api/state"); } catch (e) { return; }  // a 401 already showed "session ended"
+  let intro;
+  if (session) {  // the server's intro, not the saved one: it offers a person only while OPERATOR_TOKEN is set
+    try { intro = (await (await api("/demo/api/state")).json()).intro; } catch (e) { return; }  // a 401 showed "session ended"
   } else {
     const r = await fetch("/demo/api/session", {method: "POST"});
     if (!r.ok) return note("pay-note", `The demo could not start: ${await problem(r)}`, true);
     session = await r.json();
+    intro = session.intro;
     store(session);
   }
   $("buyer-email").textContent = session.buyer_email;
   $("buyer-password").textContent = session.buyer_password;
-  $("operator").hidden = !session.operators;
+  bubble("vg", intro);  // after a reload too: the chat above it is gone
   loadPayPal();
   refresh();
   setInterval(() => { refresh(); refreshOperator(); }, 4000);
@@ -757,7 +736,6 @@ async function start() {
 document.querySelectorAll("[data-copy]").forEach((b) => b.addEventListener("click", async () => {
   try { await navigator.clipboard.writeText($(b.dataset.copy).textContent); b.textContent = "Copied"; setTimeout(() => { b.textContent = "Copy"; }, 1500); } catch {}
 }));
-$("check").addEventListener("submit", check);
 $("ask").addEventListener("submit", (e) => { e.preventDefault(); send($("message").value); });
 $("ask-shot").addEventListener("change", () => {
   const file = $("ask-shot").files[0];
@@ -765,6 +743,11 @@ $("ask-shot").addEventListener("change", () => {
 });
 $("message").addEventListener("keydown", (e) => {
   if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); send($("message").value); }
+});
+$("stop-sharing").addEventListener("click", async () => {
+  if (!confirm("Stop sharing? Vendor Guard's team no longer sees this chat, and Vendor Guard forgets it and starts again.")) return;
+  try { await api("/demo/api/handoff/close", {}); } catch (e) { if (!(e instanceof Ended)) note("ask-note", e.message, true); return; }
+  refresh();
 });
 $("asks").replaceChildren(...ASKS.map((q) => el("button", {class: "chip", type: "button", onclick: () => send(q)}, q)));
 $("end").addEventListener("click", async () => {

@@ -6,6 +6,7 @@
 import os
 import uuid
 
+import psycopg
 import pytest
 
 from app import db
@@ -61,7 +62,7 @@ def test_ending_a_session_deletes_all_it_left_and_nothing_else():
     mine, other = demo_session(), demo_session()
     state = db.demo_state(mine[0])
     assert [s["capture_id"] for s in state["sales"]] == [mine[2]] and len(state["events"]) == 2
-    assert [(h["status"], h["reply"]) for h in state["handoffs"]] == [("open", None)]
+    assert [(h["status"], h["replies"]) for h in state["handoffs"]] == [("open", [])]
     assert db.end_demo_sessions(mine[0]) == [mine[0]]
     assert rows(*mine[1:]) == NONE and not db.touch_demo_session(mine[0])
     assert rows(*other[1:]) == ALL and db.touch_demo_session(other[0])
@@ -87,18 +88,26 @@ def test_a_sale_belongs_to_its_session_only():
     db.end_demo_sessions(other[0])
 
 
-def test_one_open_handoff_per_session_answered_once():
+def test_a_handoff_takes_messages_and_answers_until_it_is_closed():
     sid = demo_session()[0]  # its handoff is open
-    db.add_handoff(sid, [{"who": "seller", "text": "again"}], None)  # a second yes updates it
+    with pytest.raises(psycopg.errors.UniqueViolation):  # one open per session
+        db.add_handoff(sid, [{"who": "seller", "text": "again"}], None)
     (first,) = db.demo_state(sid)["handoffs"]
-    assert [h["transcript"] for h in db.open_handoffs() if h["id"] == first["id"]] == [[{"who": "seller", "text": "again"}]]
-    assert db.answer_handoff(first["id"], "Hi, Ana from Vendor Guard here.") == sid
-    assert db.answer_handoff(first["id"], "twice") is None
-    db.add_handoff(sid, [{"who": "seller", "text": "a new one"}], None)  # after an answer: a new one
-    assert [(h["status"], h["reply"]) for h in db.demo_state(sid)["handoffs"]] == [
-        ("answered", "Hi, Ana from Vendor Guard here."), ("open", None)]
-    listed = db.open_handoffs()
-    assert first["id"] not in {h["id"] for h in listed} and not any("session_id" in h for h in listed)
+    assert db.relay(sid, {"who": "seller", "text": "still there?"})
+    assert db.answer_handoff(first["id"], "Hi, Ana from Vendor Guard here.") and db.answer_handoff(first["id"], "Yes.")
+    (listed,) = [h for h in db.open_handoffs() if h["id"] == first["id"]]
+    assert [t["text"] for t in listed["transcript"]] == ["operator", "still there?", "Hi, Ana from Vendor Guard here.", "Yes."]
+    assert "session_id" not in listed and listed["updated_at"] > listed["shared_at"]
+    assert db.open_handoff_session(first["id"]) == sid
+    assert not db.close_handoff(sid, first["id"] + 1)  # the person's Close: only the card they clicked
+    assert db.close_handoff(sid, first["id"]) and not db.close_handoff(sid)
+    assert not db.relay(sid, {"who": "seller", "text": "late"}) and not db.answer_handoff(first["id"], "late")
+    assert db.open_handoff_session(first["id"]) is None
+    with db._connect() as c:  # what the person saw is deleted
+        assert c.execute("SELECT transcript, last_case FROM handoffs WHERE id = %s", (first["id"],)).fetchone() == ([], None)
+    db.add_handoff(sid, [{"who": "seller", "text": "a new one"}], None)  # after closing: a new one
+    assert [(h["status"], h["replies"]) for h in db.demo_state(sid)["handoffs"]] == [
+        ("closed", ["Hi, Ana from Vendor Guard here.", "Yes."]), ("open", [])]
     db.end_demo_sessions(sid)
 
 
