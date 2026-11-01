@@ -300,12 +300,17 @@ def test_d17_a_screenshot_in_the_chat_runs_the_check_and_counts_as_one(demo_db, 
         "steps": ["s"], "support": "help", "evidence": {"E1": {}}, "persisted": True})
     h, png = start(), "iVBORw0KGgoAAAAAAAAAAA=="
     early = said(h, "", png)
-    assert early["route"] == "start_check" and not ran  # before the price: not read, not a check
-    say(h, "45.00 USD")
-    r = said(h, "", png)
+    assert early["route"] == "start_check" and not ran  # before the price: held, not read, not a check
+    assert not demo.runs_check(h["X-Demo-Session"], "45.00") and not demo.runs_check(h["X-Demo-Session"], "cancel")
+    r = said(h, "45.00 USD")  # the price runs the check with the held screenshot, and counts it
     (args,) = ran
     assert r["route"] == "check" and args[:4] == ("", "45.00", "USD", base64.b64decode(png)) and callable(args[4])
     assert [len(ratelimit._hits[("1.1.1.1", k)]) for k in ("check", "screenshot")] == [1, 1]
+    say(h, "check")
+    say(h, "45.00 USD")
+    r = said(h, "", png)  # at the chat step
+    assert r["route"] == "check" and len(ran) == 2 and ran[1][:4] == args[:4]
+    assert [len(ratelimit._hits[("1.1.1.1", k)]) for k in ("check", "screenshot")] == [2, 2]
     for bad in ({"message": ""}, {"message": "", "image": "R0lGODlhAQABAAAAACw="}, {"image": "data:image/png;base64,x"}):
         assert client.post("/demo/api/chat", json=bad, headers=h).status_code == 422
 
@@ -323,9 +328,11 @@ def test_d20_only_a_yes_hands_the_whole_conversation_over(demo_db, choice, monke
     handoffs = demo_db[h["X-Demo-Session"]]["handoffs"]
     choice.intent = "question"
     say(h, "Can I sell gift cards?")
-    client.post("/demo/api/chat", json={"message": "", "image": png}, headers=h)  # before check: never read
+    client.post("/demo/api/chat", json={"message": "", "image": png}, headers=h)  # before check: held, not read yet
+    say(h, "45.00 USD")  # the check reads it: the image joins this line
+    say(h, "check")
     say(h, "45.00 USD")
-    client.post("/demo/api/chat", json={"message": "Buyer: paid", "image": png}, headers=h)  # the check reads it
+    client.post("/demo/api/chat", json={"message": "Buyer: paid", "image": png}, headers=h)  # at the chat step
     r = said(h, "operator")
     assert r["route"] == "handoff" and r["reply"] == chat.ASK_CONSENT and not handoffs
     assert said(h, "no")["reply"] == chat.NOT_SHARED and not handoffs
@@ -338,10 +345,14 @@ def test_d20_only_a_yes_hands_the_whole_conversation_over(demo_db, choice, monke
         {"who": "vendor_guard", "text": f"{chat.DONT_KNOW}\n\n{chat.OFFER_OPERATOR}"},
         {"who": "seller", "text": "[screenshot, not read]"},
         {"who": "vendor_guard", "text": chat.SCREENSHOT_FIRST},
+        {"who": "seller", "text": "45.00 USD", "image": f"data:image/png;base64,{png}"},
+        {"who": "vendor_guard", "text": chat.card(FAKE, True)},
+        {"who": "seller", "text": "check"},
+        {"who": "vendor_guard", "text": chat.ASK_PRICE},
         {"who": "seller", "text": "45.00 USD"},
         {"who": "vendor_guard", "text": chat.ASK_CHAT},
         {"who": "seller", "text": "Buyer: paid", "image": f"data:image/png;base64,{png}"},
-        {"who": "vendor_guard", "text": chat.card(FAKE)},
+        {"who": "vendor_guard", "text": chat.card(FAKE, True)},
         {"who": "seller", "text": "operator"},
         {"who": "vendor_guard", "text": chat.ASK_CONSENT},
         {"who": "seller", "text": "no"},
@@ -561,3 +572,41 @@ def test_d33_the_persons_close_closes_only_the_card_they_clicked(demo_db, choice
     r = client.post(f"/demo/api/operator/handoffs/{new['id']}/close", headers=op)
     demo._busy.discard(sid)
     assert (r.status_code, r.json()["detail"]) == (409, "the seller's last message is still on its way, try again in a moment")
+
+
+def test_d34_the_thread_keeps_only_its_latest_state_without_its_messages(demo_db, choice, monkeypatch):
+    """InMemorySaver kept every checkpoint until the session ended, a screenshot in each (RECHECK #39): each turn now
+    leaves one, with no messages, so a screenshot or a buyer's chat goes with the turn that read it."""
+    ran = []
+    monkeypatch.setattr(scam_check, "run", lambda *args: ran.append(args) or FAKE)
+    h = start()
+    saver, thread = demo.chat_graph.checkpointer, demo._thread(h["X-Demo-Session"])
+    stored = lambda: json.dumps([[c.checkpoint, c.pending_writes] for c in saver.list(thread)],  # noqa: E731
+                                ensure_ascii=False, default=str)
+    first, second = (base64.b64encode(b"\x89PNG\r\n\x1a\n" + bytes([n]) * 30).decode() for n in (1, 2))
+    said(h, "", first)
+    said(h, "", second)  # at the price step: held in place of the first
+    assert len(list(saver.list(thread))) == 1 and demo.chat_graph.get_state(thread).values["messages"] == []
+    assert first not in stored() and stored().count(second) == 1  # once, in screenshot
+    said(h, "45.00 USD")  # the price runs the check with the held one
+    assert ran[0][3] == base64.b64decode(second) and second not in stored()
+    say(h, "check")
+    say(h, "45.00 USD")
+    said(h, PAID)  # the buyer's chat goes with its turn
+    assert len(ran) == 2 and PAID not in stored() and len(list(saver.list(thread))) == 1
+
+
+def test_d35_a_held_screenshot_at_its_limit_or_without_a_slot_stays_held_with_a_way_out(demo_db, choice, monkeypatch):
+    ran = []
+    monkeypatch.setattr(scam_check, "run", lambda *args: ran.append(args) or FAKE)
+    h, png = start(), "iVBORw0KGgoAAAAAAAAAAA=="
+    said(h, "", png)
+    ratelimit._hits[("1.1.1.1", "screenshot")].extend([time.monotonic()] * 3)
+    (error,) = lines(say(h, "45.00 USD"))
+    assert error["message"].startswith("limit of 3 screenshots an hour reached") and "type cancel" in error["message"]
+    assert not ratelimit._hits[("1.1.1.1", "check")] and not ran
+    ratelimit._hits.clear()
+    monkeypatch.setattr(main, "SCAM_LIMIT", Full())
+    assert lines(say(h, "45.00 USD")) == [{"type": "error", "message": "busy, try again"}]
+    assert demo.runs_check(h["X-Demo-Session"], "45.00 USD") == ["check", "screenshot"] and not ran  # still held
+    assert said(h, "cancel")["reply"] == chat.CANCELLED and not demo.runs_check(h["X-Demo-Session"], "45.00 USD")

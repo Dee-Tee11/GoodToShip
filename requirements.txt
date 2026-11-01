@@ -4,5 +4,6 @@ uvicorn[standard]==0.54.0
 httpx==0.28.1
 psycopg[binary]==3.3.6
 langgraph==1.2.16
+langgraph-checkpoint==4.3.0  # imported directly: InMemorySaver (app/demo.py), whose public API demo._keep_latest uses
 groq==1.7.0
 langsmith==0.14.11

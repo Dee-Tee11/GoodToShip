@@ -8,7 +8,6 @@ On only with DEMO_MODE=true, and only against PayPal's sandbox (main.lifespan re
 capturing orders are the app's only PayPal writes. They play the buyer's purchase and stay out of the graphs.
 The session is anonymous: the page keeps its id in sessionStorage, and everything goes when it ends.
 """
-import base64
 import logging
 import os
 import secrets
@@ -26,7 +25,7 @@ from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph.message import REMOVE_ALL_MESSAGES
 from pydantic import BaseModel, Field
 
-from app import chat, db, llm, paypal, ratelimit, scam_check
+from app import chat, db, paypal, ratelimit, scam_check
 
 log = logging.getLogger(__name__)
 ENABLED = os.getenv("DEMO_MODE", "").strip().lower() == "true"
@@ -36,12 +35,14 @@ CURRENCY = "USD"  # a US sandbox business account, as in the README's Seller Pro
 OPERATOR_TOKEN = os.getenv("OPERATOR_TOKEN", "").strip()
 MAX_REPLY = 2000
 PAGE = Path(__file__).parent / "static" / "demo.html"
-# the chat graph with one thread per demo session (thread_id = session id), forgotten when the session ends.
+# the chat graph with one thread per demo session (thread_id = session id), forgotten when the session ends. Each turn
+# leaves only its latest state, without its messages (_keep_latest).
 # ponytail: in memory, so a restart or Render's sleep forgets every conversation; PostgresSaver with dispute_defense
 chat_graph = chat._build(InMemorySaver())
 # each session's conversation, for a handoff, kept only with OPERATOR_TOKEN: what the seller sent (a screenshot only
 # when a check read it) and every reply. Outside the graph, so InMemorySaver doesn't copy it into every checkpoint.
-# ponytail: no cap; 30 messages and 3 checked screenshots an hour per IP, and 30 idle minutes, bound it
+# ponytail: no cap; 30 messages and 3 checked screenshots an hour per IP bound how fast it grows, not for how long:
+# an open tab keeps its session alive (RECHECK #39)
 _transcripts: dict[str, list[dict]] = {}
 _busy: set[str] = set()  # sessions inside busy(): a chat message or "End demo"
 _busy_lock = threading.Lock()  # turn() runs in the threadpool
@@ -244,26 +245,47 @@ def _thread(session_id: str) -> dict:
     return {"configurable": {"thread_id": session_id}}
 
 
-def runs_check(session_id: str, message: str, image: bytes | None = None) -> bool:
-    """True when this message runs a scam check, decided as chat.check decides it."""
-    return chat.runs_scam_check(chat_graph.get_state(_thread(session_id)).values, message, image)
+def _keep_latest(session_id: str) -> None:
+    """The thread's latest checkpoint only, without its messages. InMemorySaver keeps every checkpoint, a screenshot in
+    each, until delete_thread (RECHECK #39), and nothing reads a thread's history, nor a turn's messages once it ended.
+    The saver's public API only. Inside the turn's busy()."""
+    saver = chat_graph.checkpointer
+    latest = saver.get_tuple(_thread(session_id))
+    # stored as [], not left out: a reducer channel with a version and no value is rebuilt from the parents on every
+    # load, LangGraph's path for migrated threads. Every turn starts by removing them anyway
+    latest.checkpoint["channel_values"]["messages"] = []
+    saver.delete_thread(session_id)
+    # no checkpoint_id: stored with no parent; every channel's version, so every value is stored again. Its pending
+    # writes go: a new turn's input never applies them
+    saver.put({"configurable": {"thread_id": session_id, "checkpoint_ns": ""}}, latest.checkpoint, latest.metadata,
+              latest.checkpoint["channel_versions"])
 
 
-def chat_turn(session_id: str, message: str, image: bytes | None, checks: bool):
+def runs_check(session_id: str, message: str, image: bytes | None = None) -> list[str]:
+    """The hourly limits this message takes: none unless it runs a scam check, decided as chat.check decides it, then
+    "check", and "screenshot" for this message's or the one held since before the price."""
+    values = chat_graph.get_state(_thread(session_id)).values
+    if not chat.runs_scam_check(values, message, image):
+        return []
+    return ["check", *(["screenshot"] if image is not None or values.get("screenshot") else [])]
+
+
+def chat_turn(session_id: str, message: str, image: bytes | None, checks: list[str]):
     """One message through the chat graph, as main.demo_chat's lines: a check's PayPal calls and node updates as they
     happen, then the reply and how it was routed, for the live panel. checks is runs_check's answer, which
     main._chat took inside the same busy(). With OPERATOR_TOKEN, the turn joins the session's transcript, and a
     yes to handoff's question hands the whole transcript to a person (db.add_handoff). While a person has it, the
     message goes to them only, as "relayed": no graph, no LLM, no check (the yes left nothing awaited, so checks is
-    False)."""
+    empty)."""
     nodes, state = {}, {}
-    url = None if image is None else f"data:{llm.image_type(image)};base64,{base64.b64encode(image).decode()}"
+    url = None if image is None else chat.data_url(image)
     # sanitized, as the check and classify read it: the operator sees what Vendor Guard saw ("price < 40" as
     # "price 40"), so a reply that went wrong on the cleaned text can be traced to it
     said = {"who": "seller", "text": scam_check.sanitize(message)}
-    if url and checks:  # only a check reads a screenshot (#26)
-        said["image"] = url
-    elif url:  # never read, and the seller was told it isn't kept
+    # said is kept only with OPERATOR_TOKEN: without it, the held screenshot isn't loaded again for it
+    if checks and (read := url or OPERATOR_TOKEN and chat_graph.get_state(_thread(session_id)).values.get("screenshot")):
+        said["image"] = read  # only a check reads a screenshot (#26): this one, or the one held for the price
+    elif url:  # not read now: held for the check, its image then joins the turn that reads it, or never read
         said["text"] = f"{said['text']}\n[screenshot, not read]".strip()
     if OPERATOR_TOKEN and db.relay(session_id, said):  # a database error fails closed: Vendor Guard doesn't answer either
         yield {"type": "relayed"}
@@ -272,15 +294,16 @@ def chat_turn(session_id: str, message: str, image: bytes | None, checks: bool):
         {"type": "text", "text": message},
         {"type": "image_url", "image_url": {"url": url}},
     ]
-    # the thread's messages start afresh each turn: no node reads past the newest, and InMemorySaver would store the
-    # whole history again in every checkpoint (a screenshot too: it stays only until the next turn or the session ends)
+    # the thread's messages start afresh each turn: no node reads past the newest. _keep_latest drops them when a turn
+    # ends; this clears what a turn the graph raised in left
     turn_input = {"messages": [RemoveMessage(id=REMOVE_ALL_MESSAGES), {"role": "user", "content": content}]}
     # the run's context, not configurable, so it isn't copied into the checkpoints. Only the demo has an operator page,
     # and only with OPERATOR_TOKEN: without it nobody could answer, so no person is offered. LIVE: check streams its
     # steps, only for a message that runs one: the custom stream moves every node onto LangGraph's background threads
     context = {"operators": bool(OPERATOR_TOKEN), **({"live": chat.LIVE} if checks else {})}
     case_id = None
-    for mode, chunk in chat_graph.stream(turn_input, _thread(session_id), context=context,
+    # durability="exit": one checkpoint, as the run ends (an error too), not one per step with the screenshot in each
+    for mode, chunk in chat_graph.stream(turn_input, _thread(session_id), context=context, durability="exit",
                                          stream_mode=["custom", "updates", "values"] if checks else ["updates", "values"]):
         if mode == "custom":  # a check's step, for the live panel only
             if chunk["type"] == "node" and chunk["node"] == "ingest_input":
@@ -292,6 +315,9 @@ def chat_turn(session_id: str, message: str, image: bytes | None, checks: bool):
             state = chunk  # the last one is this run's final state
     if case_id:  # so ending the session deletes it. After the run, which saved the check in the thread whatever happens
         db.add_demo_case(session_id, case_id)
+    # after add_demo_case, so a failure here never loses the case's link. Not when the graph raised: that turn's
+    # checkpoint stays until the next turn ends
+    _keep_latest(session_id)
     reply = state["messages"][-1].content
     route = next(node for node in nodes if node != "classify")
     if OPERATOR_TOKEN:  # no operator page, no transcript: nobody would read it

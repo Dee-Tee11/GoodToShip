@@ -169,7 +169,7 @@
         <form class="ask" id="ask">
           <label class="sr-only" for="message">Your message</label>
           <textarea id="message" maxlength="8000" placeholder="Ask a question, or type check"></textarea>
-          <label class="btn quiet" for="ask-shot" title="Attach the buyer's chat as a screenshot, when Vendor Guard asks for it">Screenshot</label>
+          <label class="btn quiet" for="ask-shot" title="Attach the buyer's chat as a screenshot">Screenshot</label>
           <input class="sr-only" id="ask-shot" type="file" accept="image/png,image/jpeg">
           <button class="btn" id="send" type="submit">Send</button>
         </form>
@@ -455,6 +455,8 @@ async function prepare(key) {
   // "check" would answer the question, or go to the person
   if (awaiting === "consent") return note("ask-note", "Answer the question about sharing first: yes, or anything else to keep it to yourself.", true);
   if (!$("with-person").hidden) return note("ask-note", "A person from Vendor Guard has this conversation. To check a buyer's chat with Vendor Guard, press Stop sharing.", true);
+  // the price would run the check on that screenshot, not on this chat
+  if (awaiting === "price" && held) return note("ask-note", "Your screenshot is waiting for its price: send the price, or type cancel first.", true);
   const base = lastSale || {item: $("item").value.trim() || "item", amount: Number($("price").value || 45).toFixed(2)};
   if (awaiting !== "chat") {
     if (awaiting !== "price" && (await send("check", false))?.awaiting !== "price") return;
@@ -558,6 +560,9 @@ const ROUTES = {question: "answered a question", start_check: "started a check",
 
 let sending = false;  // one message at a time, as the server asks
 let awaiting = null;  // the check's step after the last reply: "price", "chat" or null
+// a screenshot the server holds for the price (chat.check): sent at or before the price step, still there after a
+// reply from check at that step. Any other route clears it, a new screenshot replaces it
+let held = false;
 // one message: its reply, with a check's steps on the rail as they run (main.demo_chat), or null when none came.
 // typed: from the box, with its screenshot; prepare()'s words leave the box and the screenshot alone
 async function send(message, typed = true) {
@@ -591,6 +596,7 @@ async function send(message, typed = true) {
     if (r.route === "handoff") refresh();  // a yes opened one: seen open now, not at the next poll
     bubble("vg", r.reply);
     awaiting = r.awaiting;
+    held = awaiting === "price" && (!!file || (held && r.route === "check"));
     const how = r.intent ? `The model picked “${r.intent}”${r.notes.length ? ` and the notes ${r.notes.join(", ")}` : ""}; the reply is written by code.` : "No model call: the code routed it.";
     const ran = checking ? " It ran scam_check: its steps are above." : "";
     const what = r.intent === "not_paypal" ? "said it works with PayPal only"

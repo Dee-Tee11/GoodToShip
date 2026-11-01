@@ -1,5 +1,54 @@
 # Changes
 
+## 2026-11-01: review fixes for the held screenshot and the thread's latest state
+
+- The page's scenario chips no longer send the price while a screenshot is held: that price would have run the check on the screenshot, not on the scenario's chat. The page tracks it from the replies (`held`) and asks for the price or cancel first.
+- A held screenshot at its hourly limit: the 429 now says the screenshot is still waiting, and how to check without it (cancel, check, the chat as text). Every price would otherwise hit the same limit.
+- A screenshot sent at the price step with other text than the price: the reply now says that only the screenshot was kept (`chat.TEXT_DROPPED`), and how to send both.
+- `demo._keep_latest` runs after `db.add_demo_case`, so a failure there never loses the case's link. It stores `messages` as `[]` instead of leaving it out: LangGraph rebuilds a reducer channel with a version and no value from the parent checkpoints on every load.
+- `chat_turn` loads the held screenshot for the transcript only with `OPERATOR_TOKEN`.
+- Tests: D20 again covers a screenshot at the chat step in the transcript; C28 covers the dropped text; D35, new: a held screenshot at its limit, then with no free slot, stays held, and cancel clears it. 491 passing. Not tried in a browser.
+
+## 2026-11-01: the demo's chat thread keeps only its latest state
+
+`InMemorySaver` kept every checkpoint of a demo session's thread until the session ended, with a copy of the screenshot in each one after it came: 24 MB for each 3 MB screenshot sent at the price step (8 MB for 1 MB). An open tab keeps its session alive. On a local server (Postgres in Docker, no PayPal or Groq call), 10 such screenshots took the RSS from 102 to 335 MB, with a peak of 368 MB. Render's free instance has 512 MB, so about 18 in all, from any sessions, would restart it and lose every session.
+
+- After each turn, `demo._keep_latest` keeps only the thread's latest checkpoint, without its messages: `get_tuple`, `delete_thread`, then `put` with no parent. It uses the saver's public API only. Nothing reads a thread's history, nor a turn's messages once it ended: each turn already starts by removing them.
+  - A screenshot held for the price is now stored once, in `screenshot`.
+  - The buyer's chat, or a screenshot a check read, leaves the thread when its turn ends (RECHECK #19).
+  - A turn the graph raised in keeps its checkpoint until the next turn ends.
+- The demo's turns run with `durability="exit"`: one checkpoint as the run ends (an error too), not one per step. A turn with a 3 MB screenshot peaks at about 19 MB of Python allocations instead of 35.
+- Measured with a 3 MB screenshot at the price step:
+  - In process: 24.0 MB kept per screenshot, growing with each one, became 4.0 MB once per session. For 1 MB: 8.0 MB became 1.3 MB.
+  - On the local server, 10 screenshots: +233 MB (peak 368 MB) became +16 MB (peak 150 MB), with no growth from one to the next.
+- `langgraph-checkpoint==4.3.0` is pinned: it is imported directly, and Render would otherwise install the newest 4.x.
+- No graph change: no node, edge, intent, state field or input. No more PayPal or Groq calls. `classify` is unchanged, so no eval to rerun.
+- Left out of the same plan, both in RECHECK #39:
+  - Counting every screenshot in the per-IP limit. Judges testing the demo may share an IP, and an unread screenshot no longer piles up.
+  - Keeping the image as WebP. Each conversion took 42–108 MB more at its peak and 0.3–2.5 s here (about 10 times that on Render's 0.1 CPU), to save 0.15–1.5 MB per session.
+- Tests: D34, new. Two screenshots sent before the price leave one checkpoint, no messages, and only the second screenshot, stored once. The price's check reads it and it goes. A pasted buyer's chat goes with its turn. 490 passing. Not tried in a browser.
+
+## 2026-11-01: a screenshot sent before the price is kept for the check; the card offers a person
+
+Asked by the user after trying the demo: a receipt sent with "can I ship it? it says it's paid" was dropped, then
+dropped again at the price step, and had to be sent a third time.
+
+- `chat`: a screenshot sent before the price (before `check`, which it starts, or at the price step without a price)
+  is held in a new state field, `screenshot`, as a `data:` URL. The price then runs the check with it; a screenshot
+  sent with the price runs at once. The text sent with it is the seller's, so it never goes to the check.
+  `SCREENSHOT_FIRST` no longer asks for it again. This reverses 2026-10-30's choice to drop it (RECHECK #26): it is
+  held one step longer (#19), cleared wherever the price is (the check, cancel, a question at the price step,
+  `handoff`), and a held one that can't be read is asked for at the chat step. No node or edge changed.
+- `runs_scam_check` is true for the price once a screenshot is held, so the demo counts that message as a check and a
+  screenshot (`demo.runs_check` now returns the limits it takes) and the operator's transcript shows the image on the
+  line that ran the check; the earlier line still says `[screenshot, not read]`.
+- On the demo, a check's card ends its steps with "If you need more help from Vendor Guard, say operator to talk to a
+  person." (`chat.OPERATOR_STEP`, before PayPal's "Still unsure? …" line). Studio and `/scam-check` are unchanged.
+- The page's Screenshot hint no longer says "when Vendor Guard asks for it".
+- Tests: C28 rewritten (held, run by the price, with the price, cleared by cancel, a question or `operator`,
+  unreadable), the card's step on the demo; C13 checks that `screenshot` has the same writers as `price`; D17 and D20
+  changed. 489 passing. Not tried in a browser.
+
 ## 2026-11-01: review fixes for the streamed chat and the shared conversation
 
 - Each demo chat message runs in a thread of its own (`main._chat`), which holds the session's `busy()` and the check

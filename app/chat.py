@@ -129,10 +129,13 @@ PASTED = ("This looks like a buyer's chat, a screenshot or a payment ID, so I ha
           "I only read those inside a check. ")
 PASTE_AGAIN = (" Then paste the chat again. If it was a question, type cancel and ask it in under "
                f"{MAX_QUESTION} characters.")
-# a screenshot sent before "check" (RECHECK #26): dropped, not kept until the price comes, so it isn't stored longer
-SCREENSHOT_FIRST = ("Got your screenshot. I only read screenshots inside a check, so I haven't sent it anywhere. "
-                    "What price did you ask for? Write the amount and the currency, for example 25.00 USD. "
-                    "Then send the screenshot again. Type cancel to stop.")
+# a screenshot sent before the price, before "check" too (RECHECK #26): held in screenshot, read once the price comes
+SCREENSHOT_FIRST = ("Got your screenshot. I'll check it as soon as I have your price, and I haven't sent it anywhere "
+                    "yet. What price did you ask for? Write the amount and the currency, for example 25.00 USD. "
+                    "Type cancel to stop.")
+# a screenshot at the price step with other text than the price: the check would read only the screenshot
+TEXT_DROPPED = (" I kept only the screenshot, not the text you sent with it. If that text was the buyer's, type cancel, "
+                "say check, and send the screenshot and the text together when I ask for the chat.")
 ASK_CHAT = ("Now paste the buyer's chat exactly as written, or send a screenshot of it. It goes straight to the check. "
             "Type cancel to stop.")
 BAD_PRICE = ("I need the amount and a 3-letter currency, for example 25.00 USD: more than 0, with up to 2 decimals. "
@@ -145,6 +148,7 @@ CHECK_FAILED = "The check could not run. Say check to try again."
 CHECK_STOPPED = "I stopped the check to answer this. Say check to start it again."
 OFFER_CHECK = "Want me to check the payment in PayPal? Say check."
 OFFER_OPERATOR = "Want a person from Vendor Guard to look at this? Say operator."  # on the demo only
+OPERATOR_STEP = "If you need more help from Vendor Guard, say operator to talk to a person."  # a check's last step, demo only
 ANOTHER_PAYMENT = "Your last check ({}) covered only that payment. To check the other payment, say check."
 NO_CHECK_SHIP = "I can't tell whether you can ship without checking that payment."
 NOT_YET = "Not yet. Your last check ({}) said:"  # only for an outcome that can still change: WAIT_FOR
@@ -239,6 +243,9 @@ DATA_URL = re.compile(r"data:image/(?:png|jpeg);base64,([A-Za-z0-9+/=]+)")
 class State(MessagesState, total=False):  # Studio's Chat tab needs a state that extends MessagesState
     awaiting: Literal["price", "chat", "consent"] | None  # written by start_check, check and handoff
     price: dict | None  # {"amount", "currency"}, from the seller's own message by regex; written by check
+    # a screenshot sent before the price, as a data: URL, until the price runs the check with it. Cleared wherever the
+    # price is (#19: the buyer's chat, held no longer than the check)
+    screenshot: str | None
     intent: str  # written by classify
     entries: list[str]  # written by classify
     sentences: list[int]  # numbers in _listed(shown), for a follow-up; written by classify
@@ -275,13 +282,22 @@ def _screenshot(state) -> bytes | None:
     if len(parts) != 1 or parts[0].get("type") != "image_url":
         return None
     url = parts[0].get("image_url")
-    if not (m := DATA_URL.fullmatch(str(url.get("url") if isinstance(url, dict) else url))):
+    return _image(url.get("url") if isinstance(url, dict) else url)
+
+
+def _image(url) -> bytes | None:
+    """A PNG or JPEG from a base64 data: URL, or None. The type is read from the bytes, never from the URL."""
+    if not (m := DATA_URL.fullmatch(str(url))):
         return None
     try:
         image = base64.b64decode(m[1], validate=True)
     except binascii.Error:
         return None
     return image if llm.image_type(image) else None
+
+
+def data_url(image: bytes) -> str:
+    return f"data:{llm.image_type(image)};base64,{base64.b64encode(image).decode()}"
 
 
 def _looks_like_chat(text: str) -> bool:
@@ -404,10 +420,12 @@ def after_check(out: dict) -> dict:
     return {"last_case": last_case(out), "shown": [], "last_question": None}
 
 
-def card(out: dict) -> str:
-    """A check's result as the chat shows it: never the evidence, which holds the buyer's quotes."""
+def card(out: dict, operators: bool = False) -> str:
+    """A check's result as the chat shows it: never the evidence, which holds the buyer's quotes. On the demo, the
+    last step offers a person."""
+    steps = [*out["steps"], *([OPERATOR_STEP] if operators else [])]
     return "\n".join([f"{out['verdict']}: {out['message']}", *(s["text"] for s in out["sentences"]), "What to do:",
-                      *(f"{n}. {s}" for n, s in enumerate(out["steps"], 1)), out["support"], f"Case {out['case_id']}"])
+                      *(f"{n}. {s}" for n, s in enumerate(steps, 1)), out["support"], f"Case {out['case_id']}"])
 
 
 def _previous(state) -> str:
@@ -483,49 +501,58 @@ def _backstop(state) -> str | None:
     return None
 
 
-@owns("messages", "awaiting", "price", "shown", "last_case", "last_question")
+@owns("messages", "awaiting", "price", "shown", "last_case", "last_question", "screenshot")
 def start_check(state):
-    text = _text(state)
+    text, image = _text(state), _screenshot(state)
     pasted = text is None or _looks_like_chat(text)
-    # decoded only to pick the reply: a GIF or a broken image isn't "your screenshot" (C07)
-    reply = SCREENSHOT_FIRST if _screenshot(state) is not None else (
+    # held for the check, which reads it once the price comes. A GIF or a broken image isn't "your screenshot" (C07)
+    reply = SCREENSHOT_FIRST if image is not None else (
         (PASTED if pasted else "") + ASK_PRICE + (PASTE_AGAIN if pasted else ""))
     # a new check: the last one no longer answers "what do I do now?", nor the message before it the next one
-    return _say(reply, awaiting="price", price=None, shown=[], last_case=None, last_question=None)
+    return _say(reply, awaiting="price", price=None, shown=[], last_case=None, last_question=None,
+                screenshot=None if image is None else data_url(image))
 
 
 def runs_scam_check(state, text: str | None, image: bytes | None = None) -> bool:
-    """True when check() runs scam_check on this message: the chat as text, a screenshot, or both. A route that exposes
-    the chat counts it as a check (and a screenshot) and takes main.SCAM_LIMIT for it, as /scam-check does (503 when
-    busy). Studio has no limit, as with scam_check today."""
-    if text is None or text.strip().casefold() == "cancel" or state.get("awaiting") != "chat" or not state.get("price"):
+    """True when check() runs scam_check on this message: the chat as text, a screenshot, or both, or the price once a
+    screenshot came before it. A route that exposes the chat counts it as a check (and a screenshot) and takes
+    main.SCAM_LIMIT for it, as /scam-check does (503 when busy). Studio has no limit, as with scam_check today."""
+    if text is None or text.strip().casefold() == "cancel":
+        return False
+    if state.get("awaiting") == "price":  # the screenshot is the whole chat: the price message's text isn't the buyer's
+        return parse_price(text) is not None and (image is not None or bool(state.get("screenshot")))
+    if state.get("awaiting") != "chat" or not state.get("price"):
         return False
     clean = sanitize(text)
     # as ScamCheckIn and the /scam-check route
     return (bool(clean) or image is not None) and len(text) <= MAX_CHARS and len(clean) <= MAX_CHARS
 
 
-@owns("messages", "awaiting", "price", "shown", "last_case", "last_question")
+@owns("messages", "awaiting", "price", "shown", "last_case", "last_question", "screenshot")
 def check(state):
-    """No LLM here. scam_check runs exactly when runs_scam_check says so, with the screenshot if there is one."""
+    """No LLM here. scam_check runs exactly when runs_scam_check says so, with the screenshot if there is one: this
+    message's, or the one held since before the price."""
     text, image = _text(state), _screenshot(state)
     if image is not None:
         text = str(state["messages"][-1].text)  # the text sent with the screenshot, often none
     if text is not None and text.strip().casefold() == "cancel":
-        return _say(CANCELLED, awaiting=None, price=None, last_case=None)
+        return _say(CANCELLED, awaiting=None, price=None, last_case=None, screenshot=None)
     if text is None:
         return _say(ONLY_TEXT)
     if state.get("awaiting") == "price":
-        if not (price := parse_price(text)):
-            return _say(BAD_PRICE)
-        return _say(ASK_CHAT, awaiting="chat", price=price)
-    if state.get("awaiting") != "chat" or not state.get("price"):
+        if not (price := parse_price(text)):  # a screenshot without the price is held, as one sent before check
+            if image is None:
+                return _say(BAD_PRICE)
+            return _say(SCREENSHOT_FIRST + (TEXT_DROPPED if text.strip() else ""), screenshot=data_url(image))
+        if not runs_scam_check(state, text, image):
+            return _say(ASK_CHAT, awaiting="chat", price=price)
+        text, image = "", image or _image(state.get("screenshot"))  # the price isn't the buyer's chat
+    elif state.get("awaiting") != "chat" or not (price := state.get("price")):
         # the START router reads the raw input, where a crafted "awaiting" passes; the nodes see it filtered out
-        return _say(ASK_PRICE, awaiting="price", price=None)
-    if not runs_scam_check(state, text, image):
+        return _say(ASK_PRICE, awaiting="price", price=None, screenshot=None)
+    elif not runs_scam_check(state, text, image):
         return _say(BAD_CHAT)
     try:
-        price = state["price"]
         # an empty context: a graph invoked inside a node inherits the caller's checkpointer and stream, which would
         # store scam_check's state (the chat, the buyer's quotes) in this thread and stream it to Studio
         report = None
@@ -534,12 +561,12 @@ def check(state):
             # of this one
             report = partial(contextvars.copy_context().run, get_stream_writer())
         out = contextvars.Context().run(scam_check.run, text, price["amount"], price["currency"], image, report)
-    except scam_check.Unreadable as e:  # no verdict and no case: the seller sends it again
-        return _say(f"{str(e).capitalize()}. Type cancel to stop.")
+    except scam_check.Unreadable as e:  # no verdict and no case: the seller sends it again, at the chat step
+        return _say(f"{str(e).capitalize()}. Type cancel to stop.", awaiting="chat", price=price, screenshot=None)
     except Exception as e:
         log.warning("check failed: %s", type(e).__name__)
-        return _say(CHECK_FAILED, awaiting=None, price=None)
-    return _say(card(out), awaiting=None, price=None, **after_check(out))
+        return _say(CHECK_FAILED, awaiting=None, price=None, screenshot=None)
+    return _say(card(out, _operators()), awaiting=None, price=None, screenshot=None, **after_check(out))
 
 
 def _grounded(state, keys: list[str]) -> tuple[str, list[str]] | None:
@@ -569,11 +596,11 @@ def _answer(state, parts: list[str], shown: list[str]) -> dict:
     if _case_note(case) in shown and _other_order(state.get("last_question") or "", case):
         parts, shown = [ANOTHER_PAYMENT.format(_case_ref(case))], []
     if state.get("awaiting"):
-        return _say("\n\n".join([*parts, CHECK_STOPPED]), shown=shown, awaiting=None, price=None)
+        return _say("\n\n".join([*parts, CHECK_STOPPED]), shown=shown, awaiting=None, price=None, screenshot=None)
     return _say("\n\n".join(parts), shown=shown)
 
 
-@owns("messages", "shown", "awaiting", "price")
+@owns("messages", "shown", "awaiting", "price", "screenshot")
 def question(state):
     if state.get("intent") == "another_payment":  # classify sends it here only after a check
         return _answer(state, [ANOTHER_PAYMENT.format(_case_ref(state["last_case"]))], [])
@@ -632,7 +659,7 @@ def _other_order(text: str, case: dict) -> bool:
     return bool(case.get("price")) and bool(amounts) and not amounts & known
 
 
-@owns("messages", "shown", "awaiting", "price")
+@owns("messages", "shown", "awaiting", "price", "screenshot")
 def advise(state):
     """can_ship and next_steps, also from _backstop. The LLM only decided that the seller asks; this answers from
     last_case and shown, with notes and code's words: no answer step, no search, no PayPal call. Never says the seller
@@ -668,7 +695,7 @@ def advise(state):
     return _answer(state, parts, keys)
 
 
-@owns("messages", "shown", "awaiting", "price")
+@owns("messages", "shown", "awaiting", "price", "screenshot")
 def dispute(state):
     # ponytail: fixed text until dispute_defense exists (1-7 Nov). Then ask here for the dispute ID
     # (awaiting="dispute_id", read by a regex in check) and start dispute_defense with thread_id = that ID.
@@ -728,7 +755,7 @@ def _more_help() -> str:
     return OFFER_OPERATOR if _operators() else scam_check.SUPPORT
 
 
-@owns("messages", "awaiting", "price", "shown", "consented")
+@owns("messages", "awaiting", "price", "shown", "consented", "screenshot")
 def handoff(state):
     """The human intent and the word operator. No LLM, and no database: asks before anything is shared, then records
     the seller's answer in consented, for the demo to act on."""
@@ -736,7 +763,8 @@ def handoff(state):
         return _answer(state, [DEMO_ONLY], [])
     if state.get("awaiting") != "consent":  # the filtered state: a crafted "awaiting" in the input is only a request
         stopped = [CHECK_STOPPED] if state.get("awaiting") else []  # first, so the seller answers the question
-        return _say("\n\n".join([*stopped, ASK_CONSENT]), awaiting="consent", price=None, shown=[], consented=False)
+        return _say("\n\n".join([*stopped, ASK_CONSENT]), awaiting="consent", price=None, shown=[], consented=False,
+                    screenshot=None)
     text = _text(state)  # None for a screenshot: never a yes, and never read
     yes = text is not None and bool(CONSENT.fullmatch(text.strip()))
     return _say(SHARED if yes else NOT_SHARED, awaiting=None, shown=[], consented=yes)

@@ -336,7 +336,9 @@ def test_c13_owners():
                                                                                  "advise", "dispute", "handoff"}
     assert {n for n, fn in nodes.items() if "last_case" in fn.owns} == {"start_check", "check"}
     assert {n for n, fn in nodes.items() if "last_question" in fn.owns} == {"classify", "start_check", "check"}
-    assert nodes["handoff"].owns == {"messages", "awaiting", "price", "shown", "consented"}
+    assert nodes["handoff"].owns == {"messages", "awaiting", "price", "shown", "consented", "screenshot"}
+    # the held screenshot goes wherever the price goes: no node ends a check and leaves the buyer's screenshot behind
+    assert {n for n, fn in nodes.items() if "screenshot" in fn.owns} == {n for n, fn in nodes.items() if "price" in fn.owns}
     assert [n for n, fn in nodes.items() if "consented" in fn.owns] == ["handoff"]
     assert list(chat.graph.get_input_jsonschema()["properties"]) == ["messages"]
 
@@ -823,13 +825,51 @@ def test_c27_the_amounts_are_written_by_code_and_classify_sees_only_the_price(ch
 
 
 @pytest.mark.parametrize("message", [shot(), shot("Hi can you verify this ?")], ids=["alone", "with a request"])
-def test_c28_a_screenshot_before_check_gets_a_reply_for_an_image_and_is_not_kept(choice, talk, ran, message):
-    assert talk(message) == chat.SCREENSHOT_FIRST  # RECHECK #26: dropped, and the seller is told to send it again
-    assert choice.calls == [] and talk.state["awaiting"] == "price" and talk.state["price"] is None
-    kept = repr({k: v for k, v in talk.state.items() if k != "messages"})
-    assert repr(PNG) not in kept and "base64" not in kept
-    talk("25.00 USD")
-    assert talk(shot()).startswith("WAIT: ") and ran == [("", "25.00", "USD", PNG, None)]
+def test_c28_a_screenshot_before_check_is_held_and_the_price_runs_the_check(choice, talk, ran, message):
+    assert talk(message) == chat.SCREENSHOT_FIRST  # RECHECK #26: held, not sent again
+    assert choice.calls == [] and not ran and talk.state["awaiting"] == "price" and talk.state["price"] is None
+    assert talk("25.00 USD").startswith("WAIT: ")  # the seller's own words never go to the check
+    assert ran == [("", "25.00", "USD", PNG, None)] and not talk.state["awaiting"] and talk.state["screenshot"] is None
+
+
+def test_c28_a_screenshot_at_the_price_step_is_held_too_or_runs_with_the_price(choice, talk, ran):
+    talk("check")
+    assert talk("25.00 USD dollars") == chat.BAD_PRICE and talk.state["screenshot"] is None
+    assert talk(shot()) == chat.SCREENSHOT_FIRST and not ran  # no price with it: held
+    assert talk("40 USD").startswith("WAIT: ") and ran == [("", "40", "USD", PNG, None)]
+    talk("check")
+    assert talk(shot("25 USD")).startswith("WAIT: ") and ran[1] == ("", "25", "USD", PNG, None)  # both in one
+    talk("check")
+    assert talk(shot("Buyer: I'll pay via F&F")) == chat.SCREENSHOT_FIRST + chat.TEXT_DROPPED  # said, not lost quietly
+    assert talk.state["screenshot"] and len(ran) == 2
+
+
+@pytest.mark.parametrize("end", ["cancel", "question", "operator"])
+def test_c28_a_held_screenshot_goes_when_the_check_ends(choice, demo_talk, ran, end):
+    demo_talk(shot())
+    choice.intent, choice.entries = "question", ["vg_how_to_check"]
+    demo_talk({"question": "How do I check a payment?"}.get(end, end))
+    assert demo_talk.state["screenshot"] is None and demo_talk.state["awaiting"] != "price" and not ran
+
+
+def test_c28_a_held_screenshot_that_cant_be_read_is_asked_for_at_the_chat_step(choice, talk, monkeypatch):
+    def unreadable(*args):
+        raise scam_check.Unreadable("could not read the screenshot, try again or paste the chat as text")
+
+    monkeypatch.setattr(scam_check, "run", unreadable)
+    talk(shot())
+    assert talk("25.00 USD") == "Could not read the screenshot, try again or paste the chat as text. Type cancel to stop."
+    assert talk.state["awaiting"] == "chat" and talk.state["price"] == {"amount": "25.00", "currency": "USD"}
+    assert talk.state["screenshot"] is None
+
+
+def test_c28_on_the_demo_the_card_ends_its_steps_with_a_person(choice, talk, demo_talk, ran):
+    for t in (talk, demo_talk):
+        t("check")
+        t("25.00 USD")
+    assert chat.OPERATOR_STEP not in talk(PAID)  # Studio and the evals: no operator page
+    assert demo_talk(PAID) == chat.card(FAKE_RESULT, True)
+    assert f"{len(FAKE_RESULT['steps']) + 1}. {chat.OPERATOR_STEP}\n{scam_check.SUPPORT}" in chat.card(FAKE_RESULT, True)
 
 
 HOW = chat.VERIFIED["vg_how_to_check"]["text"]

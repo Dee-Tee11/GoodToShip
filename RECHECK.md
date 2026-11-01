@@ -37,6 +37,17 @@ Points marked with \* are important: do them first.
   Added 2026-10-30 with the demo's handoff. Whoever holds `OPERATOR_TOKEN` reads every open handoff, buyers' chats and screenshots included, and answers as "Operator". Nothing records who answered, and changing the token means a redeploy.
   *Fix:* once auth lands, operator accounts, and an audit row per answer (who, when, which handoff).
 
+- [ ] **39. A demo session keeps what it holds in memory for as long as its tab is open.** [app/demo.py](app/demo.py)
+  Added 2026-11-01, after the chat's thread was cut to its latest state (see CHANGES.md). The page polls `/demo/api/state` every 4 s, which keeps its session alive, and a session has no maximum lifetime. What a session holds stays until it ends or the service restarts. Render's free instance has 512 MB, and the server takes about 100 MB at boot.
+  - The thread holds at most one screenshot: the one held for the price, 4 MB for a 3 MB screenshot. A screenshot no check reads counts against no screenshot limit, only as a message (30 an hour per IP). So an IP that keeps many sessions open (20 new ones an hour) could hold one in each: about 80 MB an hour.
+  - With `OPERATOR_TOKEN`, `_transcripts` keeps every screenshot a check read, as a `data:` URL, until the session ends: 3 an hour per IP, about 12 MB.
+  *Fix, before the demo's link is public:* a maximum session lifetime, for example 2 hours from creation, checked in `touch_demo_session` and the sweep. Add a cap on live sessions if needed. Counting every screenshot in the `screenshot` limit, as `/scam-check` does, was planned and left out: judges testing the demo may share an IP, and with it its limits.
+  *Not done, measured 2026-11-01:* keeping the image as WebP.
+  - Lossless, on a 1170×2532 phone screenshot, it was 29–40 % of a chat's PNG and 60–75 % of a photo-heavy one.
+  - Each conversion took 42–108 MB more at its peak and 0.3–2.5 s here, about 10 times that on Render's 0.1 CPU.
+  - Groq's docs don't say whether it accepts WebP, so the image would go back to PNG before each check.
+  - It would need Pillow at runtime and a pixel cap against decompression bombs.
+
 ## LLM output
 
 - [ ] **16. Nobody measures whether `detect_signals` catches real scams.** [app/scam_check.py:183](app/scam_check.py#L183)
@@ -57,6 +68,8 @@ Points marked with \* are important: do them first.
   *2026-10-25:* the chat now has a demo endpoint (`POST /demo/api/chat`). There the thread is in memory and deleted when the demo session ends or the service restarts, so nothing reaches disk. Still open for any endpoint outside the demo.
   *2026-10-27:* the thread also keeps `last_question`, the seller's last message that `classify` read (never the buyer's chat, which never reaches `classify`), and `last_case`, codes only.
   *2026-10-30:* not fixed by the handoff, which adds to it. With `OPERATOR_TOKEN` set (since 2026-10-31, only then), the demo also keeps each session's whole conversation in memory, outside the graph (`demo._transcripts`), so a person from Vendor Guard can read it: the buyer's chat pasted at the chat step and the screenshots a check read included. Since 2026-10-31 the demo has no check panel: every check runs in the chat. With the seller's yes to `handoff`'s question, it is stored in Postgres (`handoffs`) until the session ends, then deleted with it.
+  *2026-11-01:* the thread also holds a screenshot sent before the price, in the `screenshot` field, until the price runs the check or the check ends (cancel, a question at the price step, `handoff`).
+  *2026-11-01, later:* on the demo, the thread now keeps only its latest state, without its messages (`demo._keep_latest`). A buyer's chat pasted at the chat step, or a screenshot a check read, leaves the thread when its turn ends, not when the session does. A screenshot held for the price stays in `screenshot` as before, and `_transcripts` is unchanged. Still open for Studio and `langgraph dev`.
 
 - [ ] **20. Names can reach Tavily.** [app/chat.py](app/chat.py)
   Added 2026-10-22. The search query drops self-introductions ("I'm Amanda"), emails, links, phone numbers and IDs, but not other names ("my buyer John wants F&F"). Tavily's terms give it a perpetual licence over queries.
@@ -79,7 +92,7 @@ Points marked with \* are important: do them first.
   - an image that isn't PNG or JPEG, and two images;
   - EN and PT.
   Draw the screenshots with Pillow, as `tests/test_eval_screenshot.py` does, or use the demo's "Buyer's receipt" and "Seller's receipt". Run it like the E06 eval, and check #26's fix against it.
-  *2026-10-30, partly covered by E07* (`tests/seller_dataset.jsonl`, 57 cases): most are 2–7 turns, each turn scored on the node, the notes and the verdict. Still missing: real images (no E07 case sends one), PT, other ways to say "check", and the screenshot sent before `check` (#26's case, fixed with a reply written for an image: see CHANGES.md, 2026-10-30).
+  *2026-10-30, partly covered by E07* (`tests/seller_dataset.jsonl`, 57 cases): most are 2–7 turns, each turn scored on the node, the notes and the verdict. Still missing: real images (no E07 case sends one), PT, other ways to say "check", and the screenshot sent before `check` (#26's case, fixed with a reply written for an image: see CHANGES.md, 2026-10-30; since 2026-11-01 it is held and the price runs the check).
   *2026-10-30, later:* E08 (`tests/seller_weak_dataset.jsonl`, 30 cases, run with `EVAL_DATASET=weak`) adds multi-turn cases where E07 failed most: warning signs and disputes followed by "what next?", check follow-ups, pending payments and injections. Still no images and no PT.
 
 - [ ] **29. No dataset to see the outcome and the next steps the chat gives.** [app/scam_check.py:59](app/scam_check.py#L59)

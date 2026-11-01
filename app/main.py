@@ -157,7 +157,13 @@ def _chat(body: ChatIn, request: Request, session_id: str, held: ExitStack, put)
     with held:  # one message at a time: the thread can't change between the decision and the turn
         try:
             runs_check = demo.runs_check(session_id, body.message, body.image)
-            ratelimit.hit(request, "message", *((["check"] + (["screenshot"] if body.image else [])) if runs_check else []))
+            if "screenshot" in runs_check and body.image is None:  # the held one: every price would run it again
+                try:
+                    ratelimit.hit(request, "screenshot", count=False)
+                except HTTPException as e:
+                    raise HTTPException(429, f"{e.detail}. Your screenshot is still waiting for the price: to check "
+                                        "now, type cancel, say check, and paste the buyer's chat as text", e.headers)
+            ratelimit.hit(request, "message", *runs_check)
             with _slot() if runs_check else nullcontext():
                 for line in demo.chat_turn(session_id, body.message, body.image, runs_check):
                     put(_line(line.pop("type"), **line))
