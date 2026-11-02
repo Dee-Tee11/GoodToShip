@@ -48,6 +48,13 @@ Points marked with \* are important: do them first.
   - Groq's docs don't say whether it accepts WebP, so the image would go back to PNG before each check.
   - It would need Pillow at runtime and a pixel cap against decompression bombs.
 
+- [ ] **40. Tracking is checked only on checkout payments.** [app/scam_check.py](app/scam_check.py)
+  Added 2026-11-02, with the tracking read of 2026-11-01 (see CHANGES.md). `verify_payment` reads a payment's tracking before approving it (`GET /v1/shipping/trackers?transaction_id=`). In the sandbox that read was checked only on checkout captures, by the capture ID, with tracking added through the API.
+  Not checked:
+  - a goods-and-services payment sent from paypal.com (Send money), or an ID that only Transaction Search finds. If the Tracking API refuses such an ID, that real payment always gets `WAIT_NOT_CONFIRMED`: safe, but never `VERIFIED`;
+  - tracking the seller adds by hand on paypal.com. If the API doesn't show it, a payment already shipped against can still be approved.
+  *Fix:* in the sandbox, send a goods-and-services payment from the test buyer on sandbox.paypal.com, find its ID, and call `paypal.get_trackers(id)` before and after adding tracking to it by hand. If the API refuses the ID, decide how such a payment can be approved.
+
 ## LLM output
 
 - [ ] **16. Nobody measures whether `detect_signals` catches real scams.** [app/scam_check.py:183](app/scam_check.py#L183)

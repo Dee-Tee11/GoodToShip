@@ -1243,7 +1243,7 @@ def test_c41_each_area_word_lists_its_notes_without_the_llm(choice, talk):
     greeted(talk)
     replies = [talk(word) for word in ("Vendor Guard", " warning signs ", "PayPal", "DISPUTES")]
     verdicts = {k for k in chat.VERIFIED if k in chat.VERDICT_NOTES or k == "vg_verdicts"}
-    assert len(verdicts) == 10
+    assert len(verdicts) == 11
     for key, entry in chat.VERIFIED.items():  # a new note lands in exactly one area, a verdict's note in none
         title = entry["title"].removeprefix("Warning sign: ")
         line = f"- {title[:1].upper()}{title[1:]}"

@@ -102,7 +102,8 @@ def hit(kind="URGENCY_PRESSURE", confirmed=True):
     return {"type": kind, "quote": "q", "confirmed": confirmed}
 
 
-PAID_OK = {"status": "FOUND", "paypal_status": "COMPLETED", "amount_matches": True, "recent": True, "reused": False}
+PAID_OK = {"status": "FOUND", "paypal_status": "COMPLETED", "amount_matches": True, "recent": True, "shipped": False,
+           "reused": False}
 WARN = ("VERIFIED_WITH_WARNINGS", "P.VERIFIED_WARN")
 NOT_CONFIRMED = ("WAIT", "P.WAIT_NOT_CONFIRMED")
 
@@ -117,6 +118,9 @@ NOT_CONFIRMED = ("WAIT", "P.WAIT_NOT_CONFIRMED")
     pytest.param(PAID_OK | {"recent": False}, [], ("WAIT", "P.WAIT_TOO_OLD"), id="U03 too old"),
     pytest.param(PAID_OK | {"reused": True}, [], ("WAIT", "P.WAIT_REUSED"), id="U03 already approved another case"),
     pytest.param(PAID_OK | {"reused": None}, [], NOT_CONFIRMED, id="U03 claim unknown"),
+    pytest.param(PAID_OK | {"shipped": True}, [], ("WAIT", "P.WAIT_SHIPPED"), id="U03 tracking already added"),
+    pytest.param(PAID_OK | {"shipped": None}, [], NOT_CONFIRMED, id="U03 tracking unknown"),
+    pytest.param({k: v for k, v in PAID_OK.items() if k != "shipped"}, [], NOT_CONFIRMED, id="U03 tracking not read"),
     pytest.param(PAID_OK | {"paypal_status": "UNKNOWN"}, [], ("WAIT", "P.WAIT_NOT_CLEARED"), id="U03 unknown status"),
     *[pytest.param(PAID_OK | {"paypal_status": s}, [], ("WAIT", "P.WAIT_NOT_PAID"), id=f"U03 {s}")
       for s in sorted(scam_check.NOT_PAID)],
@@ -217,6 +221,23 @@ def test_n05_a_failed_claim_is_not_verified(api, llm_stub, saved, monkeypatch):
     monkeypatch.setattr(db, "claim_payment", lambda *a: (_ for _ in ()).throw(psycopg.OperationalError("down")))
     capture(api, httpx.Response(200, json=COMPLETED))
     assert run()["verdict"] == "WAIT"
+
+
+@pytest.mark.parametrize("trackers, verdict, policy", [
+    pytest.param(httpx.Response(200, json={"trackers": [{"transaction_id": TID, "status": "SHIPPED"}]}),
+                 "WAIT", "P.WAIT_SHIPPED", id="shipped, maybe never checked here"),
+    pytest.param(httpx.Response(200, json={"trackers": [{"transaction_id": TID, "status": "CANCELLED"}]}),
+                 "VERIFIED", "P.VERIFIED", id="a cancelled tracker is no shipment"),
+    pytest.param(httpx.Response(500), "WAIT", "P.WAIT_NOT_CONFIRMED", id="PayPal can't say"),
+    pytest.param(httpx.Response(200, json={}), "WAIT", "P.WAIT_NOT_CONFIRMED", id="an odd body"),
+])
+def test_n05_a_payment_with_tracking_paid_for_a_shipped_order(api, llm_stub, saved, claimed, trackers, verdict, policy):
+    capture(api, httpx.Response(200, json=COMPLETED))
+    api.routes["trackers"].mock(return_value=trackers)
+    out = run()
+    assert (out["verdict"], out["message"]) == (verdict, scam_check.POLICY[policy])
+    assert api.routes["trackers"].calls.last.request.url.params["transaction_id"] == TID
+    assert (TID in claimed) == (verdict == "VERIFIED")  # claimed only when approved: a later check isn't "already used"
 
 
 @pytest.mark.parametrize("created, verdict", [(days_ago(13), "VERIFIED"), (days_ago(15), "WAIT"), (None, "WAIT"),

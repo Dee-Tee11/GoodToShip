@@ -87,6 +87,14 @@ def get_capture(capture_id: str) -> dict | None:
     return r.json()
 
 
+def get_trackers(transaction_id: str) -> list[dict]:
+    """The tracking added to the seller's payment; [] when it has none (200, checked in the sandbox 2026-11-01).
+    Raises on anything else."""
+    r = _call("GET", "/v1/shipping/trackers", params={"transaction_id": transaction_id})
+    r.raise_for_status()
+    return r.json()["trackers"]
+
+
 def search_transaction(transaction_id: str) -> list[dict]:
     """Transaction Search rows for an id in the last 30 days (API max is 31). Can lag up to 3 h."""
     end = datetime.now(timezone.utc).replace(microsecond=0)

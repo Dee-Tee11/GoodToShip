@@ -1,5 +1,31 @@
 # Changes
 
+## 2026-11-01: a payment with tracking paid for an order already shipped
+
+A check tied a payment to nothing but the seller's price. The same buyer could pay for item A, which the seller checked in PayPal by hand and shipped, then send the same transaction ID for item B at the same price, and get `VERIFIED`: `claimed_payments` only knows payments a Vendor Guard check approved.
+
+- `verify_payment` now reads the payment's tracking (`GET /v1/shipping/trackers?transaction_id=`, `paypal.get_trackers`) before claiming it. Any tracker that isn't `CANCELLED` gives the new `P.WAIT_SHIPPED`: "Don't ship. This payment already has tracking in PayPal, so it paid for an order you shipped." A payment with tracking is never claimed.
+- `verdict_for` fails closed: tracking it couldn't read (an error or an odd body) gives `P.WAIT_NOT_CONFIRMED`, as a failed claim does.
+- Its note is `vg_wait_shipped`, "WAIT, tracking already added: what to do". It isn't called "Already shipped", so `classify` can't confuse it with `vg_already_shipped`.
+- Checked in the sandbox on 2026-11-01:
+  - A payment with no tracking returns 200 with `{"trackers": []}`.
+  - Tracking added through `/v1/shipping/trackers-batch` and through Orders v2 `/track` both show up at once, by the capture ID.
+  - Two of the three sandbox payments of 45 USD (`09J68028LE7611608`, `32029271W6019261M`) now have test tracking, so they give `WAIT_SHIPPED`. `60N071379A623792D` has none.
+  - Not checked: tracking a seller adds by hand on paypal.com, and tracking on a payment made outside checkout or found only by Transaction Search (RECHECK #40).
+- Checked in PayPal's docs on 2026-11-02: a tracker's `status` has 23 values in the v1 definition, and only `CANCELLED` is documented as "the tracking number no longer applies" ([Shipping statuses](https://developer.paypal.com/docs/tracking/reference/shipping-status/)). Every other status, `LABEL_PRINTED` and `SHIPMENT_CREATED` included, counts as shipped, so it fails closed. No code change.
+- The README's verdict table is now in the order `verdict_for` applies it, as its "applied top-down" says. The rows that block a completed payment of the right amount (too old, tracking, tracking or claim not read, already used) come before `VERIFIED`, and an amount that differs has its own message.
+- Still open: a payment first used outside Vendor Guard, with no tracking added.
+- One more PayPal call per payment that would otherwise be approved: at most 3 per check.
+- Tests: U03 (tracking added, unknown, not read) and N05 (shipped, a cancelled tracker, PayPal error, odd body; claimed only when approved). The `api` fixture answers "no tracking" by default. 499 passing.
+- Evals rerun on 2026-11-02, on the cases the new note could move. About 47K tokens; E07 and E08 judged by Claude by hand. Runs: `E07-seller-20261102T194008Z`, `E08-weak-20261102T194014Z`, `E06-chat-20261102T194118Z`, `E10-next-20261102T194120Z`.
+  - E07 5, 18, 37, 44, 46, 51, 52, 53 and E08 2, 22, 24: every turn routes and shows notes as in 2026-10-31's runs, and `vg_wait_shipped` is never shown. The two failures are the old ones: E07 18's "Who can help me?" goes to `handoff`, and E08 2 gets `pp_fake_emails`, not `vg_already_shipped` (#35).
+  - Judge, mean score:
+    - E07: 3.75, against 3.5 for the same cases on 2026-10-31.
+    - E08: 4.00, the same as on 2026-10-31.
+  - E07 18 rose from 2 to 3: its first reply is now the right note.
+  - E07 44 rose from 2 to 3: it no longer says "another order", but it still doesn't name the earlier case (#30).
+  - E06 11 and E10 32 and 35 ("How do I add tracking…") pick `pp_add_tracking`, as before.
+
 ## 2026-11-01: review fixes for the held screenshot and the thread's latest state
 
 - The page's scenario chips no longer send the price while a screenshot is held: that price would have run the check on the screenshot, not on the scenario's chat. The page tracks it from the replies (`held`) and asks for the price or cancel first.

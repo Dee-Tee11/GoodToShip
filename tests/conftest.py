@@ -36,6 +36,10 @@ def api():
         m.post("/v1/oauth2/token", name="token").mock(
             return_value=httpx.Response(200, json={"access_token": BEARER, "expires_in": 3600})
         )
+        # no tracking on any payment, as PayPal answers it; a test sets api.routes["trackers"] for one that has some
+        m.get("/v1/shipping/trackers", name="trackers").mock(
+            return_value=httpx.Response(200, json={"trackers": [], "links": []})
+        )
         yield m
 
 

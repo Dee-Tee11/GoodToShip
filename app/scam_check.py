@@ -42,6 +42,7 @@ POLICY = {  # the instruction to the seller, inserted verbatim by code
     "P.WAIT_WRONG_AMOUNT": "Don't ship. The amount paid is not your price.",
     "P.WAIT_TOO_OLD": "Don't ship. This payment is more than 14 days old, so it is likely from an earlier order.",
     "P.WAIT_REUSED": "Don't ship. This payment was already used to approve an order.",
+    "P.WAIT_SHIPPED": "Don't ship. This payment already has tracking in PayPal, so it paid for an order you shipped.",
     "P.SCAM_LIKELY": "Don't ship the item unless the payment shows as Completed in your PayPal Activity.",
     "P.WAIT_NOT_CONFIRMED": "Not confirmed. Check your PayPal Activity for this payment before you ship.",
 }
@@ -95,6 +96,10 @@ STEPS = {  # policy_id: (label, what PayPal showed, next steps)
     ),
     "P.WAIT_REUSED": (
         "Already used", "PayPal has the payment, but Vendor Guard already used it to approve an order.",
+        ("One payment pays for one order.", NEW_ID, "Check that one before you ship."),
+    ),
+    "P.WAIT_SHIPPED": (  # not "Already shipped": classify would confuse its note with vg_already_shipped
+        "Tracking already added", "PayPal has the payment, but it already has tracking for a shipment.",
         ("One payment pays for one order.", NEW_ID, "Check that one before you ship."),
     ),
     "P.WAIT_NOT_CONFIRMED": (
@@ -254,7 +259,9 @@ def verdict_for(payment: dict, signals: list[dict] | None) -> tuple[str, str]:
             return "WAIT", "P.WAIT_NOT_CLEARED"
         if not payment.get("recent"):
             return "WAIT", "P.WAIT_TOO_OLD"
-        if payment.get("reused") is None:  # the claim could not be checked: fail closed
+        if payment.get("shipped"):  # tracking on it: it paid for an order the seller shipped, maybe outside Vendor Guard
+            return "WAIT", "P.WAIT_SHIPPED"
+        if payment.get("shipped") is None or payment.get("reused") is None:  # not checked: fail closed
             return "WAIT", "P.WAIT_NOT_CONFIRMED"
         if payment["reused"]:
             return "WAIT", "P.WAIT_REUSED"
@@ -368,6 +375,16 @@ def _lookup(tid: str, state) -> tuple[dict | None, bool]:
     return None, failed
 
 
+def _shipped(paypal_id: str) -> bool | None:
+    """Whether the seller already added tracking to this payment in PayPal, so shipped an order against it, even
+    one Vendor Guard never checked. None when PayPal couldn't say."""
+    try:
+        return any(t.get("status") != "CANCELLED" for t in paypal.get_trackers(paypal_id))
+    except Exception as e:
+        log.warning("get_trackers failed: %s", type(e).__name__)
+        return None
+
+
 @owns("payment")
 def verify_payment(state):
     """Checks every id; the first one that can be shipped against wins, else the first payment found."""
@@ -382,13 +399,15 @@ def verify_payment(state):
             continue
         found["recent"] = _recent(found.get("created"))
         if found["paypal_status"] == "COMPLETED" and found["amount_matches"] and found["recent"]:
-            try:  # claimed by PayPal's own id, so a buyer-side id can't approve the same payment twice
-                found["reused"] = not db.claim_payment(found["paypal_id"], state["case_id"])
-            except Exception as e:
-                log.error("claim_payment failed: %s", type(e).__name__)
-                found["reused"] = None
-            if found["reused"] is False:
-                return {"payment": found}
+            found["shipped"] = _shipped(found["paypal_id"])
+            if found["shipped"] is False:  # a payment shipped against is never claimed
+                try:  # claimed by PayPal's own id, so a buyer-side id can't approve the same payment twice
+                    found["reused"] = not db.claim_payment(found["paypal_id"], state["case_id"])
+                except Exception as e:
+                    log.error("claim_payment failed: %s", type(e).__name__)
+                    found["reused"] = None
+                if found["reused"] is False:
+                    return {"payment": found}
         found_any.append(found)
     if found_any:
         return {"payment": found_any[0]}

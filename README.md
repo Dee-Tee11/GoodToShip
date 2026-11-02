@@ -55,7 +55,7 @@ flowchart TD
 
 A copy can still be wrong, so the quote check confirms a quote against the copy, not against the image. That cannot approve a payment, because PayPal still has to find the ID. A misread ID gives `WAIT`. The worst cases are a false warning, or a missed warning on a real payment, where the address rule is shown anyway.
 
-`extract_claims` takes up to three 17-character transaction IDs from the chat, using a regex and no LLM. `verify_payment` tries each one against the capture API (`GET /v2/payments/captures/{id}`), then Transaction Search (which can lag by hours).
+`extract_claims` takes up to three 17-character transaction IDs from the chat, using a regex and no LLM. `verify_payment` tries each one against the capture API (`GET /v2/payments/captures/{id}`), then Transaction Search (which can lag by hours). Before it approves a completed payment of the seller's price, it reads the payment's tracking (`GET /v1/shipping/trackers?transaction_id=`): tracking means the payment already paid for an order the seller shipped, even one never checked here. Every tracker counts except a `CANCELLED` one, the only status PayPal documents as "the tracking number no longer applies", so a printed label counts too. Tracking it can't read counts as not confirmed.
 
 The webhook-fed ledger is not consulted yet. Stored bodies are only CRC32-bound (RECHECK #2), and refund events don't carry the capture ID, so a ledger hit could approve a refunded or forged payment.
 
@@ -65,10 +65,15 @@ A PayPal 403, 429, 5xx, timeout or token failure counts as "unavailable", never 
 
 | Payment (API) | Signals | Verdict | Message to seller |
 |---|---|---|---|
+| Found, `DECLINED`, `FAILED`, `REFUNDED`, `PARTIALLY_REFUNDED` or `REVERSED` | any | `WAIT` | Don't ship. This payment was declined, failed or refunded. |
+| Found, amount or currency differs from the seller's price | any | `WAIT` | Don't ship. The amount paid is not your price. |
+| Found, `PENDING` or any status but `COMPLETED` | any | `WAIT` | Don't ship yet. |
+| Found, `COMPLETED`, amount matches, more than 14 days old | any | `WAIT` | Don't ship. This payment is more than 14 days old, so it is likely from an earlier order. |
+| Found, `COMPLETED`, amount matches, tracking already added in PayPal | any | `WAIT` | Don't ship. This payment already has tracking in PayPal, so it paid for an order you shipped. |
+| Found, `COMPLETED`, amount matches, its tracking or its claim couldn't be checked | any | `WAIT` | Not confirmed. Check your PayPal Activity for this payment before you ship. |
+| Found, `COMPLETED`, amount matches, already approved an earlier case | any | `WAIT` | Don't ship. This payment was already used to approve an order. |
 | Found, `COMPLETED`, amount matches | none (checked) | `VERIFIED` | You can ship. Ship only to the address on this payment's Transaction Details page in PayPal. |
 | Found, `COMPLETED`, amount matches | any, or the check failed | `VERIFIED_WITH_WARNINGS` | Real payment. Ship only to the address on its Transaction Details page in PayPal, and don't refund differences outside PayPal. |
-| Found, `DECLINED`, `FAILED`, `REFUNDED`, `PARTIALLY_REFUNDED` or `REVERSED` | any | `WAIT` | Don't ship. This payment was declined, failed or refunded. |
-| Found, `PENDING`, or amount differs | any | `WAIT` | Don't ship yet. |
 | Not found | ≥ 2 confirmed | `SCAM_LIKELY` | Don't ship the item unless the payment shows as Completed in your PayPal Activity. |
 | Not found otherwise, API unavailable, or no ID in the chat | any | `WAIT` | Not confirmed. Check your PayPal Activity for this payment before you ship. |
 
