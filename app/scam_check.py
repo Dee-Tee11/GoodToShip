@@ -2,6 +2,8 @@
 
 PayPal is the source of truth. The LLM copies the screenshot's text, reads the chat for scam signals and writes
 the explanation; it never sees credentials, has no tools, and cannot write the verdict or the instruction to the seller.
+payment_graph (payment_check) runs the same nodes without the chat and the LLM, for payment IDs the chat held, and claims
+nothing.
 """
 import functools
 import logging
@@ -139,13 +141,19 @@ def steps(policy_id: str, signals: list[dict] | None) -> list[str]:
 PAYMENT_TEMPLATE = {  # the sentence about E1, per payment status: always code's, never the model's
     "FOUND": "PayPal shows this payment as {{E1.paypal_status}} for {{E1.amount}} {{E1.currency}}; "
     "the expected amount is {{E1.expected_amount}} {{E1.expected_currency}}.",
-    "NOT_FOUND": "PayPal has no record of the transaction IDs in this chat.",
+    "NOT_FOUND": "PayPal has no record of the transaction IDs checked.",  # also payment_check's, which reads no chat
     "UNAVAILABLE": "PayPal could not be reached to check this payment.",
     "NO_ID": "The chat has no PayPal transaction ID to check.",
 }
 
 # 17 chars with at least one digit: skips 17-letter words and both halves of WH-...-... webhook ids
 TXN_ID = re.compile(r"(?<![0-9A-Za-z-])(?=[0-9A-Z]{0,16}[0-9])[0-9A-Z]{17}(?![0-9A-Za-z-])")
+# the buyer's words are what's left without the seller's lines and the Buyer: labels (a screenshot's copy has both)
+NOT_BUYER = re.compile(r"(?im)^[ \t]*(?:seller[ \t]*:.*|buyer[ \t]*:)")
+WORD = re.compile(r"[^\W_]+")
+# ponytail: a word count, not what they say. With fewer of the buyer's words, none found is unknown, never "the chat
+# showed no warning signs" ("ID: …, thanks"). An unlabelled paste counts the seller's words too
+MIN_WORDS = 5
 # default-ignorable code points outside Unicode category C, which the C filter keeps
 IGNORABLE = re.compile("[͏ᅟᅠ឴឵᠋-᠏ㅤ︀-️ﾠ\U000e0100-\U000e01ef]")
 CAPTURE_STATUS = {s: s for s in ("COMPLETED", "PENDING", "DECLINED", "FAILED", "REFUNDED", "PARTIALLY_REFUNDED")}
@@ -284,18 +292,24 @@ def ingest_input(state):
     return {"case_id": uuid.uuid4().hex}
 
 
+def read(image: bytes, text: str = "") -> str:
+    """The screenshot's text as the vision model copies it. Raises Unreadable when it can't be read, or when it and the
+    text sent with it are longer than a chat. read_screenshot's, and the chat's for a screenshot sent before the price."""
+    try:
+        transcript = llm.read_image(READ_PROMPT, image)
+    except Exception as e:  # fail closed: a verdict without the screenshot could miss what it shows
+        log.warning("read_screenshot failed: %s", type(e).__name__)
+        raise Unreadable("could not read the screenshot, try again or paste the chat as text") from e
+    if len(sanitize(f"{text}\n\n{transcript}")) > MAX_CHARS:
+        raise Unreadable("chat too long")
+    return transcript
+
+
 @owns("transcript")
 def read_screenshot(state):
     if not state.get("image"):
         return {}
-    try:
-        transcript = llm.read_image(READ_PROMPT, state["image"])
-    except Exception as e:  # fail closed: a verdict without the screenshot could miss what it shows
-        log.warning("read_screenshot failed: %s", type(e).__name__)
-        raise Unreadable("could not read the screenshot, try again or paste the chat as text") from e
-    if len(sanitize(f"{state['text']}\n\n{transcript}")) > MAX_CHARS:
-        raise Unreadable("chat too long")
-    return {"transcript": transcript}
+    return {"transcript": read(state["image"], state["text"])}
 
 
 @owns("chat")
@@ -303,8 +317,14 @@ def sanitize_untrusted(state):
     return {"chat": sanitize(f"{state['text']}\n\n{state.get('transcript', '')}")}
 
 
+def _buyer_words(chat: str) -> int:
+    return len(WORD.findall(TXN_ID.sub(" ", NOT_BUYER.sub(" ", chat))))
+
+
 @owns("signals")
 def detect_signals(state):
+    if not (words := _buyer_words(state["chat"])):  # nothing but payment IDs: no words to read, unknown, never "none"
+        return {"signals": None}
     try:
         found = llm.ask(SignalsOut, SIGNALS_PROMPT, f"<chat>\n{state['chat']}\n</chat>")
     except Exception as e:  # fail closed: unknown signals give neither VERIFIED nor SCAM_LIKELY
@@ -316,7 +336,7 @@ def detect_signals(state):
         if quote:
             q = skeleton(quote)
             hits.append({"type": name.upper(), "quote": quote[:160], "confirmed": len(q) >= 8 and q in chat})
-    return {"signals": hits}
+    return {"signals": hits if hits or words >= MIN_WORDS else None}
 
 
 @owns("claims")
@@ -385,9 +405,9 @@ def _shipped(paypal_id: str) -> bool | None:
         return None
 
 
-@owns("payment")
-def verify_payment(state):
-    """Checks every id; the first one that can be shipped against wins, else the first payment found."""
+def _verify(state, claim: Callable[[str, str], bool]) -> dict:
+    """Checks every id; the first one that can be shipped against wins, else the first payment found. claim(paypal_id,
+    case_id) is False when an earlier case approved the payment."""
     ids = state["claims"]["ids"]
     if not ids:
         return {"payment": {"status": "NO_ID"}}
@@ -401,10 +421,10 @@ def verify_payment(state):
         if found["paypal_status"] == "COMPLETED" and found["amount_matches"] and found["recent"]:
             found["shipped"] = _shipped(found["paypal_id"])
             if found["shipped"] is False:  # a payment shipped against is never claimed
-                try:  # claimed by PayPal's own id, so a buyer-side id can't approve the same payment twice
-                    found["reused"] = not db.claim_payment(found["paypal_id"], state["case_id"])
+                try:  # by PayPal's own id, so a buyer-side id can't approve the same payment twice
+                    found["reused"] = not claim(found["paypal_id"], state["case_id"])
                 except Exception as e:
-                    log.error("claim_payment failed: %s", type(e).__name__)
+                    log.error("claim failed: %s", type(e).__name__)
                     found["reused"] = None
                 if found["reused"] is False:
                     return {"payment": found}
@@ -412,6 +432,18 @@ def verify_payment(state):
     if found_any:
         return {"payment": found_any[0]}
     return {"payment": {"status": "UNAVAILABLE" if failed else "NOT_FOUND"}}
+
+
+@owns("payment")
+def verify_payment(state):
+    return _verify(state, db.claim_payment)
+
+
+@owns("payment")
+def verify_unclaimed(state):
+    """payment_check's verify_payment: reads whether a case already approved the payment, and claims nothing, so the
+    check of the buyer's chat that a lookup's card offers can still approve it."""
+    return _verify(state, lambda paypal_id, case_id: not db.payment_claimed(paypal_id))
 
 
 @owns("verdict", "policy_id", "evidence")
@@ -520,6 +552,13 @@ def result(state) -> dict:
     }
 
 
+class PaymentIn(TypedDict):
+    """payment_graph's whole input: no signals, claims or payment, so nothing passed in can make a VERIFIED."""
+    chat: str  # the payment IDs the chat held for the price, space-separated; extract_claims keeps only TXN_ID's
+    expected_amount: str
+    expected_currency: str
+
+
 def _build():
     g = StateGraph(State)
     for node in (ingest_input, read_screenshot, sanitize_untrusted, detect_signals, extract_claims, verify_payment,
@@ -541,7 +580,20 @@ def _build():
     return g.compile()  # ponytail: no checkpointer, one short request with no interrupt()
 
 
+def _build_payment():
+    """payment_check: the payment IDs the chat held for the price, checked in PayPal by scam_check's own nodes, so
+    every payment gate comes with verify_payment, here claiming nothing. No chat and no LLM node: signals stay unknown,
+    so at best VERIFIED_WITH_WARNINGS. safe_template writes the reply, as there is no draft to validate."""
+    g = StateGraph(State, input_schema=PaymentIn)
+    g.add_sequence([ingest_input, extract_claims, ("verify_payment", verify_unclaimed), compute_verdict, safe_template,
+                    persist_case])
+    g.add_edge(START, "ingest_input")
+    g.add_edge("persist_case", END)
+    return g.compile()
+
+
 graph = _build()
+payment_graph = _build_payment()
 
 
 def run(text: str, expected_amount: str, expected_currency: str, image: bytes | None = None,
@@ -549,14 +601,25 @@ def run(text: str, expected_amount: str, expected_currency: str, image: bytes | 
     """Raises Unreadable when there is a screenshot that could not be read. report, only from the demo's chat
     (chat.check), gets each PayPal call before the update of the node that made it, for the page's live panel. The
     updates hold what the tester sent: the cleaned chat, the quotes."""
-    inputs = {"text": text, "image": image, "expected_amount": expected_amount, "expected_currency": expected_currency}
+    return _stream(graph, {"text": text, "image": image, "expected_amount": expected_amount,
+                           "expected_currency": expected_currency}, report)
+
+
+def lookup(ids: list[str], expected_amount: str, expected_currency: str,
+           report: Callable[[dict], None] | None = None) -> dict:
+    """payment_graph on the payment IDs the chat held for the price: PayPal only, no chat, no LLM. report as in run()."""
+    return _stream(payment_graph, {"chat": " ".join(ids), "expected_amount": expected_amount,
+                                   "expected_currency": expected_currency}, report)
+
+
+def _stream(g, inputs: dict, report: Callable[[dict], None] | None) -> dict:
     if report is None:
-        out = graph.invoke(inputs)
+        out = g.invoke(inputs)
         return result(out) | {"persisted": out["persisted"]}
     calls = []
     token = paypal.trace.set(calls)
     try:
-        for mode, chunk in graph.stream(inputs, stream_mode=["updates", "values"]):
+        for mode, chunk in g.stream(inputs, stream_mode=["updates", "values"]):
             while calls:
                 report({"type": "paypal", **calls.pop(0)})
             if mode == "values":

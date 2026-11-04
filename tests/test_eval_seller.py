@@ -5,7 +5,7 @@
 
 The cases are tests/seller_dataset.jsonl: the seller's messages, one per turn, and PayPal's answer for a check run in
 the chat (mocked: a capture, "not_found", a list of those, one per lookup, or null when there is none;
-"already_used" is a bool or a list, one per claim). Each turn is scored by rules: the node that
+"already_used" is a bool or a list, one per claim or lookup's read). Each turn is scored by rules: the node that
 answered, the notes it had to show, any text it must not show and, for a check, the verdict. Then an LLM judge reads
 the whole conversation against the case's reference, written from policy_pack's notes: is it correct, does the
 seller know what to do next, is it safe, does it cover the reference. The judge is the app's own model (llm.MODEL), so it may share its
@@ -197,6 +197,7 @@ def test_eval_seller(api, monkeypatch, calls, i, rep):
     monkeypatch.setattr(db, "save_case", lambda *args: None)
     used = iter(inputs["already_used"]) if isinstance(inputs["already_used"], list) else repeat(inputs["already_used"])
     monkeypatch.setattr(db, "claim_payment", lambda *args: not next(used))  # a list: one per claim, in order
+    monkeypatch.setattr(db, "payment_claimed", lambda *args: next(used))  # a lookup's read takes its turn too
     config = {"configurable": {"thread_id": f"seller-{i}-{rep}"}}
     ran, checked, explained = [], [], []  # each answer step's result, each check_answer's (sentences, errors), each check's
     grounded_, check_answer, run_ = chat._grounded, output_guardrails.check_answer, scam_check.run

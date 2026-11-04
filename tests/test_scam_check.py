@@ -43,7 +43,7 @@ def run(chat=PAID):
 
 @pytest.fixture(autouse=True)
 def claimed(monkeypatch):
-    """Fake db.claim_payment: the set of PayPal ids already approved by a case."""
+    """Fake db.claim_payment and db.payment_claimed: the set of PayPal ids already approved by a case."""
     ids = set()
 
     def claim(transaction_id, case_id):
@@ -53,6 +53,7 @@ def claimed(monkeypatch):
         return True
 
     monkeypatch.setattr(db, "claim_payment", claim)
+    monkeypatch.setattr(db, "payment_claimed", lambda transaction_id: transaction_id in ids)
     return ids
 
 
@@ -156,6 +157,16 @@ def test_u10_only_compute_verdict_decides():
     assert nodes["read_screenshot"].owns == {"transcript"}
     assert nodes["detect_signals"].owns == {"signals"}
     assert nodes["explain_and_reply"].owns == {"draft"}
+
+
+def test_u10_payment_check_is_scam_check_without_the_chat():
+    assert [n for n in scam_check.payment_graph.nodes if n != "__start__"] == [
+        "ingest_input", "extract_claims", "verify_payment", "compute_verdict", "safe_template", "persist_case"]
+    # a node added to scam_check fails this until it is decided whether payment_check needs it too
+    assert set(scam_check.graph.nodes) - set(scam_check.payment_graph.nodes) == {
+        "read_screenshot", "sanitize_untrusted", "detect_signals", "explain_and_reply", "validate_output"}
+    assert list(scam_check.payment_graph.get_input_jsonschema()["properties"]) == [
+        "chat", "expected_amount", "expected_currency"]
 
 
 def test_n01_not_found_with_two_confirmed_signals_is_scam_likely(api, llm_stub, saved):
@@ -310,6 +321,76 @@ def test_n03_a_failed_signal_check_never_gives_scam_likely(api, llm_stub, saved)
     search(api)
     llm_stub.signals = RuntimeError("groq down")
     assert run(SCAM_CHAT)["verdict"] == "WAIT"
+
+
+@pytest.mark.parametrize("chat", [TID, f"{TID}.", f"#{TID}", f"{TID}, {TID2}", f"[?] [?] {TID}"],
+                         ids=["alone", "a full stop", "a hash", "two ids", "unreadable words"])
+def test_n03_a_chat_of_only_payment_ids_is_unknown_with_no_groq_call(api, llm_stub, saved, monkeypatch, chat):
+    """Today's lone ID got VERIFIED, "no warning signs", with no chat to read (RECHECK #31)."""
+    asked = []
+    monkeypatch.setattr(llm, "ask", lambda *args, **kwargs: asked.append(args))
+    capture(api, httpx.Response(200, json=COMPLETED))
+    out = run(chat)
+    assert out["verdict"] == "VERIFIED_WITH_WARNINGS" and out["signals_checked"] is False and asked == []
+    assert out["steps"] == scam_check.steps("P.VERIFIED_WARN", None)
+
+
+def test_n03_too_few_buyer_words_with_no_sign_found_are_unknown(api, llm_stub, saved):
+    """"ID: …, thanks" got VERIFIED, "the chat showed no warning signs", with nothing to read (review of 2026-11-02).
+    The words are still read: a sign found in a few of them counts."""
+    capture(api, httpx.Response(200, json=COMPLETED))
+    out = run(f"ID: {TID}, thanks")
+    assert out["verdict"] == "VERIFIED_WITH_WARNINGS" and out["signals_checked"] is False
+    signals = lambda chat: scam_check.detect_signals({"chat": chat})["signals"]  # noqa: E731
+    assert signals(f"Buyer: I paid, ID {TID}. Thanks") is None and signals(f"Buyer: I paid in PayPal, ID {TID}") == []
+    assert signals(f"Seller: Did you pay? Please send me the ID.\nBuyer: {TID}, thanks") is None  # not the seller's words
+    llm_stub.signals = {"overpayment_refund": "send 50 back"}
+    assert [s["type"] for s in signals(f"{TID} send 50 back")] == ["OVERPAYMENT_REFUND"]
+
+
+def lookup():
+    return scam_check.lookup([TID], "25.00", "EUR")
+
+
+def test_n03_a_payment_lookup_is_never_verified_and_calls_no_llm(api, saved, claimed, monkeypatch):
+    asked = []
+    monkeypatch.setattr(llm, "ask", lambda *args, **kwargs: asked.append(args))
+    monkeypatch.setattr(llm, "read_image", lambda *args: asked.append(args))
+    capture(api, httpx.Response(200, json=COMPLETED))
+    out = lookup()
+    assert (out["verdict"], out["policy_id"], out["signals_checked"]) == ("VERIFIED_WITH_WARNINGS", "P.VERIFIED_WARN", False)
+    assert out["template"] and out["persisted"] and len(saved) == 1 and not claimed and asked == []
+    assert out["steps"] == scam_check.steps("P.VERIFIED_WARN", None) and list(out["evidence"]) == ["E1"]
+    forged = scam_check.payment_graph.invoke({"chat": TID, "expected_amount": "25.00", "expected_currency": "EUR",
+                                              "signals": []})  # not in its input: dropped
+    assert forged["verdict"] == "VERIFIED_WITH_WARNINGS" and forged.get("signals") is None
+
+
+def test_n03_a_lookup_claims_nothing_so_the_chat_checked_after_it_can_approve_it(api, llm_stub, saved, claimed):
+    """The lookup's card says to check the chat too: when the lookup claimed the payment, that check of the same payment
+    could only say "already used" (review of 2026-11-02)."""
+    capture(api, httpx.Response(200, json=COMPLETED))
+    assert lookup()["policy_id"] == "P.VERIFIED_WARN" and not claimed
+    assert run()["verdict"] == "VERIFIED" and claimed == {TID}
+    assert lookup()["policy_id"] == "P.WAIT_REUSED"  # approved by that check now
+
+
+@pytest.mark.parametrize("case, policy", [("shipped", "P.WAIT_SHIPPED"), ("used", "P.WAIT_REUSED"),
+                                          ("claims unreadable", "P.WAIT_NOT_CONFIRMED"),
+                                          ("not found", "P.WAIT_NOT_CONFIRMED"), ("unavailable", "P.WAIT_NOT_CONFIRMED"),
+                                          ("wrong amount", "P.WAIT_WRONG_AMOUNT")])
+def test_n03_a_payment_lookup_keeps_every_payment_gate(api, saved, claimed, monkeypatch, case, policy):
+    capture(api, {"not found": httpx.Response(404), "unavailable": httpx.Response(503),
+                  "wrong amount": httpx.Response(200, json=WRONG_AMOUNT)}.get(case, httpx.Response(200, json=COMPLETED)))
+    search(api)
+    if case == "shipped":
+        api.routes["trackers"].mock(return_value=httpx.Response(200, json={"trackers": [{"transaction_id": TID,
+                                                                                         "status": "SHIPPED"}]}))
+    if case == "used":
+        claimed.add(TID)
+    if case == "claims unreadable":
+        monkeypatch.setattr(db, "payment_claimed", lambda *a: (_ for _ in ()).throw(psycopg.OperationalError("down")))
+    assert lookup()["policy_id"] == policy
 
 
 WRONG_AMOUNT = COMPLETED | {"amount": {"value": "25.01", "currency_code": "EUR"}}

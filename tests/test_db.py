@@ -98,11 +98,11 @@ def test_a_handoff_takes_messages_and_answers_until_it_is_closed():
     (listed,) = [h for h in db.open_handoffs() if h["id"] == first["id"]]
     assert [t["text"] for t in listed["transcript"]] == ["operator", "still there?", "Hi, Ana from Vendor Guard here.", "Yes."]
     assert "session_id" not in listed and listed["updated_at"] > listed["shared_at"]
-    assert db.open_handoff_session(first["id"]) == sid
+    assert db.open_handoff_session(first["id"]) == sid and db.handoff_open(sid)
     assert not db.close_handoff(sid, first["id"] + 1)  # the person's Close: only the card they clicked
     assert db.close_handoff(sid, first["id"]) and not db.close_handoff(sid)
     assert not db.relay(sid, {"who": "seller", "text": "late"}) and not db.answer_handoff(first["id"], "late")
-    assert db.open_handoff_session(first["id"]) is None
+    assert db.open_handoff_session(first["id"]) is None and not db.handoff_open(sid)
     with db._connect() as c:  # what the person saw is deleted
         assert c.execute("SELECT transcript, last_case FROM handoffs WHERE id = %s", (first["id"],)).fetchone() == ([], None)
     db.add_handoff(sid, [{"who": "seller", "text": "a new one"}], None)  # after closing: a new one
@@ -111,10 +111,28 @@ def test_a_handoff_takes_messages_and_answers_until_it_is_closed():
     db.end_demo_sessions(sid)
 
 
+def test_test_tracking_marks_a_paid_sale_of_its_session_once():
+    (sid, order, cap, _), other = demo_session(), demo_session()
+    assert db.claim_demo_tracking(other[0], order, "T1") is None  # another session's sale
+    assert db.claim_demo_tracking(sid, order, "T1") == cap
+    assert db.claim_demo_tracking(sid, order, "T2") is None  # already marked: a second click
+    db.release_demo_tracking(order, "T2")  # not its number: still marked
+    assert [s["tracking"] for s in db.demo_state(sid)["sales"]] == ["T1"]
+    db.release_demo_tracking(order, "T1")  # PayPal refused it: a click can try again
+    assert db.claim_demo_tracking(sid, order, "T3") == cap
+    unpaid = uuid.uuid4().hex
+    db.add_demo_sale(sid, unpaid, "Lens", "10.00")
+    assert db.claim_demo_tracking(sid, unpaid, "T4") is None
+    db.end_demo_sessions(sid)
+    db.end_demo_sessions(other[0])
+
+
 def test_u12_claims_hold_in_the_real_sql():
     e, cap = event(uuid.uuid4().hex), uuid.uuid4().hex
     assert db.claim_event(e) and not db.claim_event(e)  # ON CONFLICT DO NOTHING, rowcount 1 then 0
+    assert not db.payment_claimed(cap)
     assert db.claim_payment(cap, "case-1") and not db.claim_payment(cap, "case-2")
+    assert db.payment_claimed(cap)
     with db._connect() as c:
         c.execute("DELETE FROM webhook_events WHERE id = %s", (e["id"],))
         c.execute("DELETE FROM claimed_payments WHERE transaction_id = %s", (cap,))

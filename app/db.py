@@ -30,6 +30,8 @@ SCHEMA = (
     capture_id text,
     capture_status text,
     created_at timestamptz NOT NULL DEFAULT now())""",
+    # the test tracking number the demo added in PayPal (demo.ship_order); Neon's table predates it
+    "ALTER TABLE demo_sales ADD COLUMN IF NOT EXISTS tracking text",
     """CREATE TABLE IF NOT EXISTS demo_cases (
     case_id text PRIMARY KEY,
     session_id text NOT NULL REFERENCES demo_sessions ON DELETE CASCADE)""",
@@ -84,6 +86,13 @@ def claim_payment(transaction_id: str, case_id: str) -> bool:
         return cur.rowcount == 1
 
 
+def payment_claimed(transaction_id: str) -> bool:
+    """True if an earlier case approved this payment. Reads only: payment_check's lookup claims nothing."""
+    with _connect() as c:
+        return c.execute("SELECT EXISTS (SELECT 1 FROM claimed_payments WHERE transaction_id = %s)",
+                         (transaction_id,)).fetchone()[0]
+
+
 def save_case(case_id: str, verdict: str, result: dict) -> None:
     """One scam_check result. `result` holds no raw chat and no buyer quotes."""
     with _connect() as c:
@@ -126,6 +135,22 @@ def set_demo_capture(order_id: str, capture_id: str, status: str) -> None:
                   (capture_id, status, order_id))
 
 
+def claim_demo_tracking(session_id: str, order_id: str, tracking: str) -> str | None:
+    """The sale's capture id, the sale now marked with this tracking number, if it is this session's, paid and not
+    marked yet; else None. Marked before PayPal is called, so a second click while it runs adds no second tracker."""
+    with _connect() as c:
+        row = c.execute("UPDATE demo_sales SET tracking = %s WHERE order_id = %s AND session_id = %s "
+                        "AND capture_status = 'COMPLETED' AND tracking IS NULL RETURNING capture_id",
+                        (tracking, order_id, session_id)).fetchone()
+    return row[0] if row else None
+
+
+def release_demo_tracking(order_id: str, tracking: str) -> None:
+    """Unmarks a sale that PayPal didn't take the tracking for, so a click can try again."""
+    with _connect() as c:
+        c.execute("UPDATE demo_sales SET tracking = NULL WHERE order_id = %s AND tracking = %s", (order_id, tracking))
+
+
 def add_demo_case(session_id: str, case_id: str) -> None:
     with _connect() as c:
         c.execute("INSERT INTO demo_cases (case_id, session_id) VALUES (%s, %s)", (case_id, session_id))
@@ -147,6 +172,13 @@ def relay(session_id: str, said: dict) -> bool:
     with _connect() as c:
         return c.execute("UPDATE handoffs SET transcript = transcript || %s, updated_at = now() "
                          "WHERE session_id = %s AND status = 'open'", (Jsonb([said]), session_id)).rowcount == 1
+
+
+def handoff_open(session_id: str) -> bool:
+    """True while a person has this session's conversation: its messages are relayed to them, never read."""
+    with _connect() as c:
+        return c.execute("SELECT EXISTS (SELECT 1 FROM handoffs WHERE session_id = %s AND status = 'open')",
+                         (session_id,)).fetchone()[0]
 
 
 def open_handoffs() -> list[dict]:
@@ -188,7 +220,7 @@ def demo_state(session_id: str) -> dict:
     ids = {"ids": [session_id]}
     with _connect() as c:
         sales = c.execute(
-            "SELECT order_id, item, amount, capture_id, capture_status FROM demo_sales "
+            "SELECT order_id, item, amount, capture_id, capture_status, tracking FROM demo_sales "
             "WHERE session_id = ANY(%(ids)s) ORDER BY created_at", ids).fetchall()
         events = c.execute(
             "SELECT id, event_type, body->>'summary', body->'resource'->>'id', body->'resource'->>'status', received_at "
@@ -196,7 +228,7 @@ def demo_state(session_id: str) -> dict:
         handoffs = c.execute("SELECT id, status, replies FROM handoffs WHERE session_id = ANY(%(ids)s) ORDER BY id",
                              ids).fetchall()
     return {
-        "sales": [dict(zip(("order_id", "item", "amount", "capture_id", "capture_status"), r)) for r in sales],
+        "sales": [dict(zip(("order_id", "item", "amount", "capture_id", "capture_status", "tracking"), r)) for r in sales],
         "events": [{"id": e[0], "event_type": e[1], "summary": e[2], "resource_id": e[3], "status": e[4],
                     "received_at": e[5].isoformat()} for e in events],
         "handoffs": [dict(zip(("id", "status", "replies"), r)) for r in handoffs],

@@ -1,5 +1,153 @@
 # Changes
 
+## 2026-11-03: review fixes for a handoff after a restart, the card's unread line and the restart notice
+
+From the review of the three entries below, decided with the user.
+
+- **A restart during a handoff no longer stores a screenshot nothing read.** `demo.runs_check` asked Postgres whether a person has the conversation only when the thread said `consented`, and a restart forgets the thread. A screenshot sent to the person then took the `screenshot` limit and a slot, and was relayed with its image, stored in `handoffs` (RISKS: a screenshot no check read is never kept). With `OPERATOR_TOKEN`, every message now asks `db.handoff_open` (one `SELECT`, as `db.relay` already is).
+- **A screenshot sent before check with text that looks like the buyer's** (`Buyer:`/`Seller:` lines, an ID or over 400 characters) says the text wasn't kept (`TEXT_DROPPED`, as at the price step). The seller's own "Hi can you verify this?" still isn't mentioned.
+- **The card's "I checked only the payment" and "I couldn't check the buyer's chat" only where the chat could change the outcome:** `VERIFIED_WITH_WARNINGS`, and a payment PayPal can't find. No longer on `WAIT_NOT_CONFIRMED` for no ID, PayPal unreachable, or tracking or the claim unread, where a check of the chat ends the same. `chat.CHAT_CAN_CHANGE` is gone.
+- **The restart notice says "say check" only when that message didn't start a check or ask about sharing** (`chat.RESTARTED_CHECK`): a screenshot or an ID sent after a restart is held, and the reply asks for the price.
+- Tests:
+  - C28: the buyer's words and a long text with a screenshot before check. C44: the card's two lines on `WAIT_NOT_CONFIRMED` by PayPal's status. D41: no "say check" after check or an ID; a screenshot after a restart during a handoff is relayed unread and counted in no limit.
+  - 540 passing offline. `tests/test_db.py` 6 of 6 against Postgres 16 (Docker), so the SQL of the entries below (`payment_claimed`, `handoff_open`, the tracking) ran too.
+- E07 rerun after this day's four entries, judged by Claude by hand (`EVAL_JUDGE=0`, `E07-seller-20261103T103025Z`): 16 conversations judged fresh, 42 identical to an already judged one keep its verdict.
+  - Against `E07-seller-20261102T225530Z`: mean score 3.98 → 4.14, cases passing every rule and criterion 32 → 36 of 58, safe 58 of 58 both times. Rules failed on 9 cases, all `classify`'s picks (notes or route) and all among the 12 that failed before: 20, 28 and 41 pass now. No case fails that passed.
+  - 58 (an ID, then the price) still shows "I checked only the payment" on `VERIFIED_WITH_WARNINGS`. The `WAIT_NOT_CONFIRMED` cases (24, 51, 53, 55) read their chats, so neither line shows. The screenshot, handoff and restart fixes are demo paths that E07 doesn't run: the tests above cover them.
+  - Up (LLM variance, no code of this day): 24 (3 → 4, "not proof of a scam" now in the reply to "is the buyer a scammer?"), 54 (4 → 5, the Seller Protection note on the cousin's address), 26 (the check no longer flags proof the chat doesn't have; still 3: "What should I ask the buyer?" gets "I don't have that information").
+- README (the demo's restart notice).
+
+## 2026-11-03: the demo says when a restart forgot the chat
+
+Found by the user: a check, the price, and the reply was the intro. `uvicorn --reload` had restarted the server when `tests/test_db.py` was saved. The chat's thread is in memory (`InMemorySaver`) and went; the session is in Postgres and stayed, so the page kept working and the price reached an empty thread: no `awaiting`, no `greeted`, so `other()` greeted. Not the hourly limits: a limit is an error line under the box, and the message stays in it. Render's sleep and deploys do the same.
+
+- `demo.chat_turn`: a thread with no state is greeted (`_greet`), and the reply starts with `chat.RESTARTED`: "I restarted and lost our conversation up to this message. If you had started a check, say check to start it again." The message still goes to the graph, so a question is answered. Not for a message relayed to a person: the handoff is in Postgres too.
+- Tests: D41. 537 passing offline. Not tried in a browser.
+- README (the demo, the tests).
+
+## 2026-11-03: up to 3 held for the price, and a screenshot read when it comes
+
+From the same review: at the price step, a screenshot and a message with an ID replaced each other without a word, and the words beside an ID were dropped quietly. The user's design: keep what comes, up to 3, the oldest dropped with a warning, and read a screenshot's ID and amount as soon as it comes. The amount is shown only after the check (D1).
+
+- **`held` replaces `screenshot` and `payment_ids`:** up to 3 items, oldest first, before `check` too.
+  - A screenshot's item is its cleaned copy, the IDs in it and the one amount it shows, never the image. A short message's item is its IDs, never its text.
+  - Owned by the same six nodes as `price`, and cleared in the same places.
+- **A screenshot is read when it comes** (`scam_check.read`, now shared with `read_screenshot`, so the graph doesn't change).
+  - The reply names the IDs it found ("I read your screenshot and found payment 3Y66…"), or says it has none, so a misread ID shows. That reply no longer says "I haven't sent it anywhere yet".
+  - One that can't be read, or whose copy has no text, is said at once, and what was held stays.
+- **Each reply says what happened:** the words beside an ID weren't kept (`ONLY_IDS`); the text sent with a screenshot at the price step wasn't either (`TEXT_DROPPED`, as before); the oldest was dropped (`DROPPED`); and, with more than one, what is held (`HOLDING`).
+- **Why 3, the user's question:** the IDs never reach the model, only code and PayPal.
+  - The model reads each screenshot, one per call, and the held text for warning signs. That text stays within one chat's 8 000 characters: past it, the oldest is dropped too.
+  - More IDs would mean more PayPal calls per check (up to 3 each) and more payments that could match the price by chance.
+- **The price checks them all:** `scam_check` on the copies and the IDs, newest first, so the check's 3 IDs are the newest; `payment_check` for IDs alone. A screenshot sent with the price is read and held like the others first.
+- **The screenshot's amount (D1):**
+  - Read by a regex: a number next to the code of a currency PayPal takes, and exactly one distinct amount, else none (`ponytail:`).
+  - Never shown before the price and never used as it, so the seller writes their own: a buyer who paid half shows half.
+  - After the check, when PayPal shows another amount for that payment: "Your screenshot shows 250.00 USD, but PayPal shows 25.00 USD for this payment. Only PayPal's amount counts." The verdict doesn't change.
+- **Demo:**
+  - A screenshot takes the `screenshot` limit and a slot when it is read, not at the price (`chat.reads_screenshot`, `demo.runs_check`). `main._chat`'s message for a held screenshot at its limit is gone: nothing held waits for a limit now.
+  - A message relayed to a person takes no limit: `runs_check` asks `db.handoff_open` when the thread has consented. A screenshot sent with nothing awaited is read now, so it would have counted.
+  - The live panel shows the read as a `read` line, with the copy and the IDs, outside the check's rail. The transcript keeps a screenshot when it is read.
+- `start_check` sanitizes once and builds the pasted-chat reply only when nothing is held (the review's double `sanitize`).
+- Tests:
+  - C13: `held`. C20, C28: read when it comes and held as a copy, checked at the price, the text not kept said, an unreadable or empty copy said at once with nothing lost; at the chat step, asked for again.
+  - C44: up to 3, the oldest dropped and named, all checked newest first, a lookup for IDs alone, the held text within one chat, the screenshot's amount after the check only when PayPal's differs.
+  - D17 (counted when read, the `read` line), D20 (the transcript), D30 (no limit while shared), D34 (copies in the thread, never images), D35 (a screenshot at its limit or with no free slot is neither read nor held), D39.
+  - `test_db`: `handoff_open` while open and after closing. Not run: no `TEST_DATABASE_URL` here.
+  - 536 passing offline. Not tried in a browser; E07 not rerun.
+- README (Graph 3's check, the demo, the limits, the tests), RISKS (a row, the LLM cost), RECHECK (#19, #39).
+
+## 2026-11-03: review fixes for the payment lookup and Your orders
+
+From the `/code-review` of 2026-11-02's two entries. Decided with the user: the lookup claims nothing, a minimum of the buyer's words, `operator` at any step, the tracking races accepted, the docs follow the page. What the price step holds, and the double `sanitize` in `start_check`, are in the entry above.
+
+- **A lookup claims nothing.** Its card says to check the chat too, but `payment_check` had claimed the payment, so that check of the same payment could only say "already used": an honest buyer's real payment, flagged as reused.
+  - `payment_check`'s `verify_payment` is `scam_check.verify_unclaimed`: the same gates (`_verify`), but it only reads whether a case already approved the payment (`db.payment_claimed`, a `SELECT`). A failed read is "not confirmed", as a failed claim is. The node keeps its name, so the live panel and U10 don't change.
+  - A seller who ships on the lookup alone leaves the payment unclaimed: a later check of the same ID for another order can be approved, unless tracking was added in PayPal (`WAIT_SHIPPED`), as the card's steps say. The user's choice, in RISKS.
+- **The card says the chat wasn't read only where the chat could change the outcome:**
+  - "I checked only the payment in PayPal…" only on a lookup's `VERIFIED_WITH_WARNINGS` and "not confirmed" `WAIT` (two warning signs make `SCAM_LIKELY` of a payment PayPal can't find), no longer on tracking, a reuse or a wrong amount (`chat.CHAT_CAN_CHANGE`).
+  - A check whose signals are unknown says, on the same outcomes, "I couldn't check the buyer's chat for warning signs: it had too little text, or reading it failed." (`chat.NOT_READ`). A chat of only an ID at the chat step got `VERIFIED_WITH_WARNINGS` with no warning sign listed and no reason. It offers no new check: that check may have claimed the payment.
+- **Too few of the buyer's words, with none found, is unknown.** "ID: 3Y66…, thanks" got `VERIFIED`, "the chat showed no warning signs".
+  - The buyer's words are what's left without the IDs, the `Seller:` lines and the `Buyer:` labels (`scam_check.NOT_BUYER`). With none, no Groq call, as before. With fewer than 5 (`MIN_WORDS`), the chat is still read and a sign found counts, but none found is `signals: None`. A word count, not what they say (`ponytail:`). `/scam-check` too.
+  - E07 cases 37, 44, 45, 51 and 54 pasted 2 to 4 of the buyer's words and expect `VERIFIED`. Their chats now have 5 ("Paid in PayPal, ID …. Thanks!"; 45: "I just paid in PayPal, ID …."), so they still test what they did. E07's sha changed. Not rerun.
+- **`operator` at any step.** At the chat step it was checked as the buyer's chat: the demo's Ask for a person ran a check (a Groq call, one of the hour's checks, a case) and showed a WAIT card instead of the question. `route_in` now sends the word, alone, to `handoff` at any step, as `cancel` is read at either step, and `runs_scam_check` doesn't count it. `handoff` ends the check first, as at the price step. `classify`'s own `operator` rule is gone: the word no longer reaches it.
+- **"Not found" no longer says "in this chat"**, which a lookup's card showed beside "not the buyer's chat": "PayPal has no record of the transaction IDs checked." (`PAYMENT_TEMPLATE`).
+- **Mark as shipped:**
+  - When unmarking a refused sale fails too, the tester gets PayPal's 502, not a 500, and the failure is logged. The sale then stays marked.
+  - The comments no longer say a second click never adds a second tracker, nor that no answer means not shipped. A lost answer, and the poll showing SHIPPED while the call runs, are accepted for the sandbox demo, in RISKS.
+- **The page:** a second click on a Copy button within 1.5 s no longer leaves "Copied" on it for good. The receipt buttons use `quiet()`, which now takes attributes. The panel's line for unknown signals names the 5 words.
+- **Docs:** Your orders is a card per order, with a SHIPPED pill and a Tracking row, as the page draws it. The README and the entry below said a table and "Shipped · VG-DEMO-…".
+- Tests:
+  - N03: a lookup claims nothing, so the chat checked after it gets `VERIFIED`, and a lookup after that `WAIT_REUSED`; an unreadable claim is "not confirmed"; 4 of the buyer's words are unknown, 5 are read, a sign in fewer counts, and the seller's lines don't count.
+  - C44: the card's two lines per outcome; a chat of only an ID at the chat step says it wasn't read.
+  - C34: at the chat step, `operator` ends the check and asks, with no check. D36: a failed unmark still shows PayPal's refusal. D40: the page's Ask for a person at the chat step runs no check and takes no check limit.
+  - `test_db`: `payment_claimed` before and after a claim. Not run: no `TEST_DATABASE_URL` here.
+  - The E07 harness fakes `db.payment_claimed` from `already_used` too.
+  - 533 passing offline. Not tried in a browser.
+- README (the verdict table, `detect_signals`, `payment_check`, Graph 3's card and `human`, the tests), RISKS (the `payment_check`, `handoff` and test tracking rows).
+
+## 2026-11-02: a payment ID sent before the price is looked up with the price (RECHECK #31 closed)
+
+On /demo, "Can you check this status for me ? 22X770663E203730E" got "This looks like a buyer's chat… Then paste the chat again", and the price, "100 USD", got "Now paste the buyer's chat": `start_check` kept nothing of a text message, only a screenshot. Pasting the ID alone at the chat step was worse. One Groq run on 2026-11-02 read `{"signals": []}` for a lone ID, so a good payment got `VERIFIED`, "the chat showed no warning signs", with no chat to read.
+
+#31 planned a new `classify` intent. A message with an ID never reaches `classify` (`route_in` sends it to `start_check`), so the fix routes by regex, and `classify` and its prompt stay as they were.
+
+- **`scam_check`: a chat of only payment IDs is never sent to the LLM.**
+  - `detect_signals` returns `signals: None` when no letter or digit is left once the IDs are taken out (`skeleton`). That covers "3Y66…", "3Y66….", "#3Y66…", two IDs, and a screenshot copied as "[?] [?] 3Y66…".
+  - At best `VERIFIED_WITH_WARNINGS`, with no Groq call. "ID: 3Y66…, thanks" is still read. `/scam-check` too.
+- **A new graph, `payment_check`** (`scam_check.payment_graph`, `scam_check.lookup()`), decided with the user:
+  - `ingest_input → extract_claims → verify_payment → compute_verdict → safe_template → persist_case`: `scam_check`'s own nodes, so every payment gate comes with `verify_payment`. No chat and no LLM node.
+  - Its input is only `chat` (the IDs), `expected_amount` and `expected_currency`, so `signals` can't be passed in: never `VERIFIED`, never `SCAM_LIKELY`.
+  - `run()` and `lookup()` share the stream that feeds the demo's live panel (`_stream`). In `langgraph.json`: `langgraph dev` serves it with its 6 nodes and 3-field input (checked through its API, not in Studio's UI).
+- **`chat` holds the IDs, never the text** (`payment_ids`, a new state field):
+  - A message of at most 400 characters with an ID and no `Buyer:`/`Seller:` line, before `check` or at the price step, holds its IDs (up to 3, by `extract_claims`). The reply: "I'll look up payment 22X770663E203730E in PayPal as soon as I have your price. I haven't sent it anywhere yet. What price did you ask for?…".
+  - The price looks them up with `payment_check`, without asking for the chat. The card adds "I checked only the payment in PayPal, not the buyer's chat. To check the chat for warning signs too, say check and paste it."
+  - So the buyer's words in such a message are never read for warning signs (the user's choice: code can't tell them from the seller's own question). A labelled or longer message keeps today's flow (E07 29).
+  - An ID at the price step, which got "I need the amount…" and was lost, is held too.
+  - The newest of a held screenshot and held IDs replaces the other; a screenshot sent with the price wins.
+  - Cleared wherever `screenshot` is: the check, cancel, a question at the price step, `handoff`. Owned by the same six nodes as `price`.
+  - `route_in`, `classify` and `_looks_like_chat` don't change.
+- **Demo:**
+  - The reply line has `held` (a screenshot or IDs wait for the price). The page uses it instead of guessing from what it sent, so a scenario chip doesn't send a price for a held ID.
+  - The price that runs a lookup takes the "check" limit and a slot, like a check (`runs_check`, unchanged).
+  - The panel's line for unknown signals no longer says the model failed, nor its `safe_template` line that the model's sentences were replaced. The rail shows the nodes a lookup doesn't run as skipped.
+- Calls: an ID, then the price, makes no Groq call. Before, the seller had to paste the ID again, which made 1 and gave a false `VERIFIED`. PayPal's calls are a check's.
+- Tests:
+  - N03: a chat of only IDs is unknown with no Groq call (5 forms); a word beside the ID is still read; a `payment_check` lookup is `VERIFIED_WITH_WARNINGS` with no LLM call, even with `signals: []` passed in, and keeps every gate (tracking, already used, not found, PayPal down, wrong amount). N03, not N06: the README's build order keeps N05–N10 for `dispute_defense`.
+  - U10: `payment_check`'s nodes, the nodes the two graphs don't share, its 3-field input.
+  - C07 (a labelled ID and a long message with an ID keep today's flow), C13 (who owns `payment_ids`), C20 (an ID at the price step is held), C44 (held, looked up with no Groq call and its steps streamed, cleared, not settable through the input, the newest replaces the other, an ID at the price step).
+  - D13 (`held` in the reply line), D39 (an ID, then the price, on the demo: six steps, its case tied to the session, a check and not a screenshot, `held`).
+  - 527 passing offline. `tests/test_db.py` not run: no SQL changed. Not tried in a browser.
+- Evals, judged by Claude by hand (`EVAL_JUDGE=0`):
+  - E06 39 ("Is 8MC585209K746392H a real payment?"): `start_check`, no LLM call, and the reply names the ID (`E06-chat-20261102T223407Z`).
+  - E07 58, a new case ("payment ID first"): the ID, then "25.00 EUR", gets `VERIFIED_WITH_WARNINGS` with "I checked only the payment", and no chat is asked for. E07 29 (labelled) is unchanged. Both pass every rule and criterion, scored 5 and 5 (`E07-seller-20261102T223419Z`). E07 now has 58 cases, so its sha changed.
+- README (the `payment_check` subsection, Graph 1's table, Graph 3, Pasted chats, the demo, Studio, the tests), RISKS (a row, the LLM cost), RECHECK (#31 deleted).
+
+## 2026-11-02: the demo's Your orders, with Mark as shipped
+
+The demo couldn't show 2026-11-01's tracking check: nothing in it added tracking to a payment. The user allowed one more sandbox write for it, on the same terms as the demo's create and capture.
+
+- **Your orders**, a section of its own after step 2: the session's sales, newest first, with item, price, transaction ID (Copy ID), payment status, shipping and the two receipts.
+  - Each order is a card.
+  - It is redrawn only when an order changes, so a button keeps its focus.
+- **Mark as shipped** (`POST /demo/api/orders/{id}/ship`), on a paid order of the session:
+  - Test tracking through Orders v2 `POST /v2/checkout/orders/{id}/track`: carrier `OTHER`, number `VG-DEMO-<order id>`, `notify_payer: false`, and the capture ID from the database. The order then shows SHIPPED and a Tracking row with that number.
+  - Orders v2's schema lists no `PayPal-Request-Id` for the track call (read 2026-11-02), so the guard is ours. `db.claim_demo_tracking` marks the sale before the call, so a second click gets a 409 and makes no PayPal call. `db.release_demo_tracking` unmarks it when PayPal refuses it or doesn't answer. The fixed `PayPal-Request-Id: track-<order id>` is sent anyway.
+  - `demo_sales.tracking` is a new column (`ALTER TABLE … ADD COLUMN IF NOT EXISTS`: Neon already has the table). `/demo/api/state` returns it, and still makes no PayPal call.
+  - A new per-IP limit: 10 shipments an hour.
+- **The chips pick their order** from the polled sales, no longer from the last sale made in the tab:
+  - "Honest buyer" and "Says they paid too much" take the latest paid order that hasn't shipped.
+  - The new "Reuses a shipped payment" takes the latest shipped one and gets `WAIT_SHIPPED`: the buyer asks for a second item at the same price, with the shipped order's ID.
+  - Each is locked until such an order exists, and its title says why. After a reload, they use the orders already there.
+- The live panel's `verify_payment` line says "Tracking already added in PayPal".
+- No graph change and no Groq call. One PayPal POST per order shipped, the first time only.
+- Tests:
+  - D36: only a paid order of the session, and only once; the body and the headers; a refusal, or no answer, unmarks it.
+  - D37: the poll never calls PayPal.
+  - D38: after Mark as shipped, the chat's check gives `WAIT_SHIPPED`, reading the tracking of the same capture.
+  - `test_db`: marked once, and unmarked only with its own number.
+  - 503 passing offline, and `tests/test_db.py` 6 of 6 against Postgres. Not tried in a browser.
+
 ## 2026-11-01: a payment with tracking paid for an order already shipped
 
 A check tied a payment to nothing but the seller's price. The same buyer could pay for item A, which the seller checked in PayPal by hand and shipped, then send the same transaction ID for item B at the same price, and get `VERIFIED`: `claimed_payments` only knows payments a Vendor Guard check approved.

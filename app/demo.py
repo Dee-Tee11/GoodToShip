@@ -5,7 +5,8 @@ PayPal call of the check as it runs. With their yes, the seller can hand the con
 the person closes it. Closing deletes what the person saw and starts the chat over, as a new session's.
 
 On only with DEMO_MODE=true, and only against PayPal's sandbox (main.lifespan refuses to start otherwise). Creating and
-capturing orders are the app's only PayPal writes. They play the buyer's purchase and stay out of the graphs.
+capturing orders, and adding test tracking to a paid one, are the app's only PayPal writes. They play the buyer's
+purchase and the seller's shipment, and stay out of the graphs.
 The session is anonymous: the page keeps its id in sessionStorage, and everything goes when it ends.
 """
 import logging
@@ -40,8 +41,8 @@ PAGE = Path(__file__).parent / "static" / "demo.html"
 # ponytail: in memory, so a restart or Render's sleep forgets every conversation; PostgresSaver with dispute_defense
 chat_graph = chat._build(InMemorySaver())
 # each session's conversation, for a handoff, kept only with OPERATOR_TOKEN: what the seller sent (a screenshot only
-# when a check read it) and every reply. Outside the graph, so InMemorySaver doesn't copy it into every checkpoint.
-# ponytail: no cap; 30 messages and 3 checked screenshots an hour per IP bound how fast it grows, not for how long:
+# when it was read) and every reply. Outside the graph, so InMemorySaver doesn't copy it into every checkpoint.
+# ponytail: no cap; 30 messages and 3 read screenshots an hour per IP bound how fast it grows, not for how long:
 # an open tab keeps its session alive (RECHECK #39)
 _transcripts: dict[str, list[dict]] = {}
 _busy: set[str] = set()  # sessions inside busy(): a chat message or "End demo"
@@ -162,6 +163,34 @@ def capture_order(order_id: str, session_id: str = Depends(session)):
     return out
 
 
+@router.post("/demo/api/orders/{order_id}/ship")
+def ship_order(order_id: str, request: Request, session_id: str = Depends(session)):
+    """Test tracking on a paid sale of this session, so a check of its payment gives WAIT_SHIPPED. Orders v2's track
+    call lists no PayPal-Request-Id (its schema, read 2026-11-02): the sale is marked before the call, so a second
+    click while it runs is a 409. The fixed request id is sent anyway. An answer lost after PayPal added the tracker
+    lets a later click add a second one (RISKS.md)."""
+    ratelimit.hit(request, "ship")
+    if not db.demo_sale_exists(session_id, order_id):  # the id comes from the browser: only this session's sales
+        raise HTTPException(404, "no such sale in this demo session")
+    tracking = f"VG-DEMO-{order_id}"  # the same body on every try
+    if not (capture_id := db.claim_demo_tracking(session_id, order_id, tracking)):
+        raise HTTPException(409, "this sale isn't paid, or it already has tracking")
+    try:
+        r = paypal._call("POST", f"/v2/checkout/orders/{order_id}/track",
+                         headers={"PayPal-Request-Id": f"track-{order_id}"},
+                         json={"capture_id": capture_id, "tracking_number": tracking, "carrier": "OTHER",
+                               "carrier_name_other": "Vendor Guard demo", "notify_payer": False})
+        if r.is_error:
+            raise _paypal_error(r, "tracking")
+    except Exception:  # refused, or no answer (which may still have added it): unmarked, so a click can try again
+        try:
+            db.release_demo_tracking(order_id, tracking)
+        except Exception as e:  # PayPal's error is the one the tester needs; the sale stays marked
+            log.error("release_demo_tracking failed: %s", type(e).__name__)
+        raise
+    return {"tracking": tracking}
+
+
 @router.get("/demo/api/state")
 def state(session_id: str = Depends(session)):
     out = db.demo_state(session_id)
@@ -262,12 +291,15 @@ def _keep_latest(session_id: str) -> None:
 
 
 def runs_check(session_id: str, message: str, image: bytes | None = None) -> list[str]:
-    """The hourly limits this message takes: none unless it runs a scam check, decided as chat.check decides it, then
-    "check", and "screenshot" for this message's or the one held since before the price."""
-    values = chat_graph.get_state(_thread(session_id)).values
-    if not chat.runs_scam_check(values, message, image):
+    """The hourly limits this message takes, decided as chat decides: "check" for a check or a lookup
+    (chat.runs_scam_check), "screenshot" for a screenshot read now, held for the price or checked
+    (chat.reads_screenshot). None while a person has the conversation: chat_turn relays the message, unread. Asked of
+    Postgres, not of the thread's consented: a restart forgets the thread, not the handoff."""
+    if OPERATOR_TOKEN and db.handoff_open(session_id):
         return []
-    return ["check", *(["screenshot"] if image is not None or values.get("screenshot") else [])]
+    values = chat_graph.get_state(_thread(session_id)).values
+    return [*(["check"] if chat.runs_scam_check(values, message, image) else []),
+            *(["screenshot"] if chat.reads_screenshot(values, message, image) else [])]
 
 
 def chat_turn(session_id: str, message: str, image: bytes | None, checks: list[str]):
@@ -282,14 +314,18 @@ def chat_turn(session_id: str, message: str, image: bytes | None, checks: list[s
     # sanitized, as the check and classify read it: the operator sees what Vendor Guard saw ("price < 40" as
     # "price 40"), so a reply that went wrong on the cleaned text can be traced to it
     said = {"who": "seller", "text": scam_check.sanitize(message)}
-    # said is kept only with OPERATOR_TOKEN: without it, the held screenshot isn't loaded again for it
-    if checks and (read := url or OPERATOR_TOKEN and chat_graph.get_state(_thread(session_id)).values.get("screenshot")):
-        said["image"] = read  # only a check reads a screenshot (#26): this one, or the one held for the price
-    elif url:  # not read now: held for the check, its image then joins the turn that reads it, or never read
+    if url and "screenshot" in checks:  # read in this turn: held for the price, or by the check
+        said["image"] = url
+    elif url:  # never read: dropped at the consent step, or by cancel
         said["text"] = f"{said['text']}\n[screenshot, not read]".strip()
     if OPERATOR_TOKEN and db.relay(session_id, said):  # a database error fails closed: Vendor Guard doesn't answer either
         yield {"type": "relayed"}
         return
+    # the thread is in memory, the session in Postgres: after a restart (Render's sleep, a deploy, --reload) the page
+    # still works, and a price sent for a check that was forgotten would get the intro without a word
+    restarted = not chat_graph.get_state(_thread(session_id)).values
+    if restarted:
+        _greet(session_id)
     content = message if image is None else [
         {"type": "text", "text": message},
         {"type": "image_url", "image_url": {"url": url}},
@@ -319,12 +355,15 @@ def chat_turn(session_id: str, message: str, image: bytes | None, checks: list[s
     # checkpoint stays until the next turn ends
     _keep_latest(session_id)
     reply = state["messages"][-1].content
-    route = next(node for node in nodes if node != "classify")
+    if restarted:  # "say check" only when this message didn't start one, nor ask about sharing
+        reply = f"{chat.RESTARTED}{'' if state.get('awaiting') else chat.RESTARTED_CHECK}\n\n{reply}"
+    route =next(node for node in nodes if node != "classify")
     if OPERATOR_TOKEN:  # no operator page, no transcript: nobody would read it
         pair = [said, {"who": "vendor_guard", "text": reply}]
         if nodes.get("handoff", {}).get("consented"):  # the row holds everything so far, this turn too
             db.add_handoff(session_id, [*_transcripts.get(session_id, []), *pair], state.get("last_case"))
         _transcripts.setdefault(session_id, []).extend(pair)  # after the row: a refused one leaves no "Sent" behind
     classified = nodes.get("classify") or {}
+    # held: screenshots or payment IDs wait for the price, so the page's scenario chips don't send one (demo.html)
     yield {"type": "reply", "reply": reply, "route": route, "intent": classified.get("intent"),
-           "notes": classified.get("entries", []), "awaiting": state.get("awaiting")}
+           "notes": classified.get("entries", []), "awaiting": state.get("awaiting"), "held": bool(state.get("held"))}

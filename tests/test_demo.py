@@ -10,9 +10,9 @@ import pytest
 from fastapi.testclient import TestClient
 from starlette.requests import Request
 
-from app import chat, db, demo, main, paypal, ratelimit, scam_check
+from app import chat, db, demo, llm, main, paypal, ratelimit, scam_check
 from tests.conftest import BEARER
-from tests.test_chat import choice  # noqa: F401  (a fixture)
+from tests.test_chat import choice, held_reply  # noqa: F401  (choice is a fixture)
 from tests.test_scam_check import (  # noqa: F401  (claimed is an autouse fixture, llm_stub a fixture)
     PAID, SCAM_CHAT, TID, TWO_SIGNALS, capture, claimed, llm_stub,
 )
@@ -66,6 +66,7 @@ def demo_db(monkeypatch):
 
     monkeypatch.setattr(db, "add_handoff", add_handoff)
     monkeypatch.setattr(db, "relay", relay)
+    monkeypatch.setattr(db, "handoff_open", lambda sid: bool(open_row(sid)[1]))
     monkeypatch.setattr(db, "answer_handoff", answer_handoff)
     monkeypatch.setattr(db, "open_handoff_session", lambda hid: open_row(hid=hid)[0])
     monkeypatch.setattr(db, "close_handoff", close_handoff)
@@ -75,9 +76,26 @@ def demo_db(monkeypatch):
     monkeypatch.setattr(db, "touch_demo_session", lambda sid: sid in sessions)
     monkeypatch.setattr(db, "end_demo_sessions", lambda sid=None: [sid] if sid and sessions.pop(sid, None) else [])
     monkeypatch.setattr(db, "add_demo_sale", lambda sid, oid, item, amount: sessions[sid]["sales"].update(
-        {oid: {"order_id": oid, "item": item, "amount": amount}}))
+        {oid: {"order_id": oid, "item": item, "amount": amount, "capture_id": None, "capture_status": None,
+               "tracking": None}}))
     monkeypatch.setattr(db, "demo_sale_exists", lambda sid, oid: oid in sessions[sid]["sales"])
-    monkeypatch.setattr(db, "set_demo_capture", lambda oid, cid, status: None)
+    sale = lambda oid: next(s["sales"][oid] for s in sessions.values() if oid in s["sales"])  # noqa: E731
+    monkeypatch.setattr(db, "set_demo_capture", lambda oid, cid, status: sale(oid).update(capture_id=cid,
+                                                                                          capture_status=status))
+
+    def claim_demo_tracking(sid, oid, tracking):  # as the SQL: this session's, paid, not marked yet
+        row = sessions[sid]["sales"].get(oid)
+        if not row or row["capture_status"] != "COMPLETED" or row["tracking"]:
+            return None
+        row["tracking"] = tracking
+        return row["capture_id"]
+
+    def release_demo_tracking(oid, tracking):
+        if sale(oid)["tracking"] == tracking:
+            sale(oid)["tracking"] = None
+
+    monkeypatch.setattr(db, "claim_demo_tracking", claim_demo_tracking)
+    monkeypatch.setattr(db, "release_demo_tracking", release_demo_tracking)
     monkeypatch.setattr(db, "add_demo_case", lambda sid, case_id: sessions[sid]["cases"].append(case_id))
     monkeypatch.setattr(db, "demo_state", lambda sid: {
         "sales": list(sessions[sid]["sales"].values()), "events": [],
@@ -242,7 +260,7 @@ def test_d13_the_chat_runs_a_check_over_three_messages_in_its_own_session(api, d
     capture(api, httpx.Response(200, json=USD_PAID))
     h, other = start(), start("2.2.2.2")
     assert said(h, "check") == {"reply": chat.ASK_PRICE, "route": "start_check", "intent": None, "notes": [],
-                                      "awaiting": "price"}
+                                      "awaiting": "price", "held": False}
     assert said(h, "45.00 USD")["awaiting"] == "chat"
     r = said(h, PAID)
     assert r["route"] == "check" and r["reply"].startswith("VERIFIED: ") and r["awaiting"] is None
@@ -293,34 +311,38 @@ def test_d16_a_session_takes_one_message_at_a_time(demo_db, choice):
     assert say(h, "hello").status_code == 401
 
 
-def test_d17_a_screenshot_in_the_chat_runs_the_check_and_counts_as_one(demo_db, choice, monkeypatch):
+def test_d17_a_screenshot_in_the_chat_runs_the_check_and_counts_as_one(demo_db, choice, llm_stub, monkeypatch):
     ran = []
+    llm_stub.transcript = "Buyer: paid"
     monkeypatch.setattr(scam_check, "run", lambda *args: ran.append(args) or {
         "case_id": "c1", "verdict": "WAIT", "policy_id": "P.WAIT_NOT_CONFIRMED", "message": "m", "sentences": [],
-        "steps": ["s"], "support": "help", "evidence": {"E1": {}}, "persisted": True})
+        "steps": ["s"], "support": "help", "evidence": {"E1": {}}, "signals_checked": True, "persisted": True})
     h, png = start(), "iVBORw0KGgoAAAAAAAAAAA=="
-    early = said(h, "", png)
-    assert early["route"] == "start_check" and not ran  # before the price: held, not read, not a check
+    *steps, early = lines(say(h, "", png))
+    assert steps == [{"type": "read", "transcript": "Buyer: paid", "ids": []}]  # the page shows what was read
+    assert early["route"] == "start_check" and early["held"] and not ran  # before the price: read and held, not checked
+    assert [len(ratelimit._hits[("1.1.1.1", k)]) for k in ("check", "screenshot")] == [0, 1]  # counted when read
     assert not demo.runs_check(h["X-Demo-Session"], "45.00") and not demo.runs_check(h["X-Demo-Session"], "cancel")
-    r = said(h, "45.00 USD")  # the price runs the check with the held screenshot, and counts it
+    r = said(h, "45.00 USD")  # the price checks the held copy: a check, and no second read
     (args,) = ran
-    assert r["route"] == "check" and args[:4] == ("", "45.00", "USD", base64.b64decode(png)) and callable(args[4])
+    assert r["route"] == "check" and args[:4] == ("Buyer: paid", "45.00", "USD", None) and callable(args[4])
     assert [len(ratelimit._hits[("1.1.1.1", k)]) for k in ("check", "screenshot")] == [1, 1]
     say(h, "check")
     say(h, "45.00 USD")
-    r = said(h, "", png)  # at the chat step
-    assert r["route"] == "check" and len(ran) == 2 and ran[1][:4] == args[:4]
+    r = said(h, "", png)  # at the chat step: read by the check
+    assert r["route"] == "check" and len(ran) == 2 and ran[1][:4] == ("", "45.00", "USD", base64.b64decode(png))
     assert [len(ratelimit._hits[("1.1.1.1", k)]) for k in ("check", "screenshot")] == [2, 2]
     for bad in ({"message": ""}, {"message": "", "image": "R0lGODlhAQABAAAAACw="}, {"image": "data:image/png;base64,x"}):
         assert client.post("/demo/api/chat", json=bad, headers=h).status_code == 422
 
 
 FAKE = {"case_id": "c1", "verdict": "WAIT", "policy_id": "P.WAIT_NOT_CONFIRMED", "message": "m", "sentences": [],
-        "steps": ["s"], "support": "help", "evidence": {"E1": {}}, "persisted": True}
+        "steps": ["s"], "support": "help", "evidence": {"E1": {}}, "signals_checked": True, "persisted": True}
 TOKEN = "t" * 40
 
 
-def test_d20_only_a_yes_hands_the_whole_conversation_over(demo_db, choice, monkeypatch):
+def test_d20_only_a_yes_hands_the_whole_conversation_over(demo_db, choice, llm_stub, monkeypatch):
+    llm_stub.transcript = "Buyer: paid"
     monkeypatch.setattr(demo, "OPERATOR_TOKEN", TOKEN)
     monkeypatch.setattr(chat, "TAVILY_KEY", "")
     monkeypatch.setattr(scam_check, "run", lambda *args: FAKE)
@@ -328,8 +350,8 @@ def test_d20_only_a_yes_hands_the_whole_conversation_over(demo_db, choice, monke
     handoffs = demo_db[h["X-Demo-Session"]]["handoffs"]
     choice.intent = "question"
     say(h, "Can I sell gift cards?")
-    client.post("/demo/api/chat", json={"message": "", "image": png}, headers=h)  # before check: held, not read yet
-    say(h, "45.00 USD")  # the check reads it: the image joins this line
+    client.post("/demo/api/chat", json={"message": "", "image": png}, headers=h)  # before check: read and held
+    say(h, "45.00 USD")  # the check reads the held copy
     say(h, "check")
     say(h, "45.00 USD")
     client.post("/demo/api/chat", json={"message": "Buyer: paid", "image": png}, headers=h)  # at the chat step
@@ -343,9 +365,9 @@ def test_d20_only_a_yes_hands_the_whole_conversation_over(demo_db, choice, monke
     assert row["transcript"] == [
         {"who": "seller", "text": "Can I sell gift cards?"},
         {"who": "vendor_guard", "text": f"{chat.DONT_KNOW}\n\n{chat.OFFER_OPERATOR}"},
-        {"who": "seller", "text": "[screenshot, not read]"},
-        {"who": "vendor_guard", "text": chat.SCREENSHOT_FIRST},
-        {"who": "seller", "text": "45.00 USD", "image": f"data:image/png;base64,{png}"},
+        {"who": "seller", "text": "", "image": f"data:image/png;base64,{png}"},
+        {"who": "vendor_guard", "text": held_reply(chat.READ_NO_ID)},
+        {"who": "seller", "text": "45.00 USD"},
         {"who": "vendor_guard", "text": chat.card(FAKE, True)},
         {"who": "seller", "text": "check"},
         {"who": "vendor_guard", "text": chat.ASK_PRICE},
@@ -491,6 +513,7 @@ def test_d30_while_a_person_has_the_conversation_vendor_guard_never_answers(demo
     for message in ("operator", "check", "45.00 USD", "Buyer: paid"):  # no model, no check, nothing awaited
         assert lines(say(h, message)) == [{"type": "relayed"}]
     assert lines(say(h, "", "iVBORw0KGgoAAAAAAAAAAA==")) == [{"type": "relayed"}]  # a screenshot isn't passed on
+    assert not ratelimit._hits[("1.1.1.1", "screenshot")]  # nor read, so not counted
     assert demo.chat_graph.get_state(thread).config == before and len(choice.calls) == calls
     (row,) = demo_db[h["X-Demo-Session"]]["handoffs"]
     assert row["transcript"][-5:] == [{"who": "seller", "text": t} for t in
@@ -576,37 +599,178 @@ def test_d33_the_persons_close_closes_only_the_card_they_clicked(demo_db, choice
 
 def test_d34_the_thread_keeps_only_its_latest_state_without_its_messages(demo_db, choice, monkeypatch):
     """InMemorySaver kept every checkpoint until the session ended, a screenshot in each (RECHECK #39): each turn now
-    leaves one, with no messages, so a screenshot or a buyer's chat goes with the turn that read it."""
+    leaves one, with no messages, and a screenshot held for the price is kept as its copy, never as the image."""
     ran = []
     monkeypatch.setattr(scam_check, "run", lambda *args: ran.append(args) or FAKE)
+    monkeypatch.setattr(llm, "read_image", lambda prompt, image: f"Buyer: copy {image[-1]}")
     h = start()
     saver, thread = demo.chat_graph.checkpointer, demo._thread(h["X-Demo-Session"])
     stored = lambda: json.dumps([[c.checkpoint, c.pending_writes] for c in saver.list(thread)],  # noqa: E731
                                 ensure_ascii=False, default=str)
     first, second = (base64.b64encode(b"\x89PNG\r\n\x1a\n" + bytes([n]) * 30).decode() for n in (1, 2))
     said(h, "", first)
-    said(h, "", second)  # at the price step: held in place of the first
+    said(h, "", second)  # at the price step: held beside the first
     assert len(list(saver.list(thread))) == 1 and demo.chat_graph.get_state(thread).values["messages"] == []
-    assert first not in stored() and stored().count(second) == 1  # once, in screenshot
-    said(h, "45.00 USD")  # the price runs the check with the held one
-    assert ran[0][3] == base64.b64decode(second) and second not in stored()
+    assert first not in stored() and second not in stored() and stored().count("Buyer: copy 2") == 1
+    said(h, "45.00 USD")  # the price checks both copies, the newest first, and they go
+    assert ran[0][0] == "Buyer: copy 2\n\nBuyer: copy 1" and "Buyer: copy" not in stored()
     say(h, "check")
     say(h, "45.00 USD")
     said(h, PAID)  # the buyer's chat goes with its turn
     assert len(ran) == 2 and PAID not in stored() and len(list(saver.list(thread))) == 1
 
 
-def test_d35_a_held_screenshot_at_its_limit_or_without_a_slot_stays_held_with_a_way_out(demo_db, choice, monkeypatch):
-    ran = []
-    monkeypatch.setattr(scam_check, "run", lambda *args: ran.append(args) or FAKE)
+def test_d35_a_screenshot_at_its_limit_or_without_a_slot_is_neither_read_nor_held(demo_db, choice, monkeypatch):
+    """Read when it comes since 2026-11-03, so it takes its limits then, and the price that checks it none of them."""
+    read = []
+    monkeypatch.setattr(llm, "read_image", lambda *args: read.append(args) or "Buyer: paid")
     h, png = start(), "iVBORw0KGgoAAAAAAAAAAA=="
-    said(h, "", png)
     ratelimit._hits[("1.1.1.1", "screenshot")].extend([time.monotonic()] * 3)
-    (error,) = lines(say(h, "45.00 USD"))
-    assert error["message"].startswith("limit of 3 screenshots an hour reached") and "type cancel" in error["message"]
-    assert not ratelimit._hits[("1.1.1.1", "check")] and not ran
+    (error,) = lines(say(h, "", png))
+    assert error["message"].startswith("limit of 3 screenshots an hour reached") and not read
     ratelimit._hits.clear()
     monkeypatch.setattr(main, "SCAM_LIMIT", Full())
-    assert lines(say(h, "45.00 USD")) == [{"type": "error", "message": "busy, try again"}]
-    assert demo.runs_check(h["X-Demo-Session"], "45.00 USD") == ["check", "screenshot"] and not ran  # still held
-    assert said(h, "cancel")["reply"] == chat.CANCELLED and not demo.runs_check(h["X-Demo-Session"], "45.00 USD")
+    assert lines(say(h, "", png)) == [{"type": "error", "message": "busy, try again"}] and not read
+    assert not demo.chat_graph.get_state(demo._thread(h["X-Demo-Session"])).values.get("held")
+
+
+def paid_sale(api, h, order="ORDER1"):
+    """A sale of this session, created and captured through the demo's routes, with PayPal mocked."""
+    api.post("/v2/checkout/orders").mock(return_value=httpx.Response(201, json={"id": order}))
+    api.post(f"/v2/checkout/orders/{order}/capture").mock(return_value=httpx.Response(201, json={
+        "purchase_units": [{"payments": {"captures": [{"id": TID, "status": "COMPLETED",
+                                                       "amount": {"value": "45.00", "currency_code": "USD"}}]}}]}))
+    assert client.post("/demo/api/orders", json={"item": "Camera", "amount": "45"}, headers=h).status_code == 200
+    assert client.post(f"/demo/api/orders/{order}/capture", headers=h).status_code == 200
+
+
+def ship(h, order="ORDER1"):
+    return client.post(f"/demo/api/orders/{order}/ship", headers=h)
+
+
+def test_d36_mark_as_shipped_adds_test_tracking_once_to_a_paid_sale_of_the_session(api, demo_db):
+    h, other = start(), start("2.2.2.2")
+    paid_sale(api, h)
+    db.add_demo_sale(h["X-Demo-Session"], "UNPAID1", "Lens", "10.00")  # never captured
+    track = api.post("/v2/checkout/orders/ORDER1/track").mock(return_value=httpx.Response(201, json={"id": "ORDER1"}))
+    assert ship(other).status_code == 404 and ship(h, "UNPAID1").status_code == 409 and not track.called
+    assert ship(h).json() == {"tracking": "VG-DEMO-ORDER1"}
+    assert json.loads(track.calls[0].request.content) == {  # the capture id from the database: the request has no body
+        "capture_id": TID, "tracking_number": "VG-DEMO-ORDER1", "carrier": "OTHER",
+        "carrier_name_other": "Vendor Guard demo", "notify_payer": False}
+    assert track.calls[0].request.headers["PayPal-Request-Id"] == "track-ORDER1"
+    assert ship(h).status_code == 409 and track.call_count == 1  # a second click: never a second tracker
+    assert [s["tracking"] for s in client.get("/demo/api/state", headers=h).json()["sales"]] == ["VG-DEMO-ORDER1", None]
+
+
+def test_d36_a_refused_tracking_leaves_the_sale_unshipped_for_another_try(api, demo_db):
+    h = start()
+    paid_sale(api, h)
+    track = api.post("/v2/checkout/orders/ORDER1/track").mock(side_effect=[
+        httpx.Response(422, json={"name": "UNPROCESSABLE_ENTITY", "details": [{"issue": "CAPTURE_STATUS_NOT_VALID"}]}),
+        httpx.ConnectTimeout("no answer"), httpx.Response(201, json={})])
+    tracking = lambda: demo_db[h["X-Demo-Session"]]["sales"]["ORDER1"]["tracking"]  # noqa: E731
+    r = ship(h)
+    assert (r.status_code, r.json()["detail"]) == (502, "PayPal refused the tracking (422, CAPTURE_STATUS_NOT_VALID)")
+    assert tracking() is None
+    with pytest.raises(httpx.ConnectTimeout):  # no answer: unmarked too
+        ship(h)
+    assert tracking() is None
+    assert ship(h).json() == {"tracking": "VG-DEMO-ORDER1"} and track.call_count == 3
+
+
+def test_d36_a_failed_unmark_still_shows_paypals_refusal(api, demo_db, monkeypatch):
+    """The database error replaced PayPal's 502 with a 500 (review of 2026-11-02)."""
+    h = start()
+    paid_sale(api, h)
+    api.post("/v2/checkout/orders/ORDER1/track").mock(return_value=httpx.Response(
+        422, json={"name": "UNPROCESSABLE_ENTITY", "details": [{"issue": "CAPTURE_STATUS_NOT_VALID"}]}))
+    monkeypatch.setattr(db, "release_demo_tracking", lambda *a: (_ for _ in ()).throw(RuntimeError("database down")))
+    r = ship(h)
+    assert (r.status_code, r.json()["detail"]) == (502, "PayPal refused the tracking (422, CAPTURE_STATUS_NOT_VALID)")
+
+
+def test_d37_the_state_poll_never_calls_paypal(api, demo_db):
+    h = start()
+    paid_sale(api, h)
+    api.post("/v2/checkout/orders/ORDER1/track").mock(return_value=httpx.Response(201, json={}))
+    ship(h)
+    called = len(api.calls)
+    assert client.get("/demo/api/state", headers=h).json()["sales"][0]["tracking"] == "VG-DEMO-ORDER1"
+    assert len(api.calls) == called  # "Shipped" comes from the database
+
+
+def test_d38_a_shipped_sales_payment_gives_wait_shipped_in_the_chat(api, demo_db, choice):
+    h = start()
+    paid_sale(api, h)
+    track = api.post("/v2/checkout/orders/ORDER1/track").mock(return_value=httpx.Response(201, json={}))
+    ship(h)
+    written = json.loads(track.calls[0].request.content)
+    capture(api, httpx.Response(200, json=USD_PAID))
+    api.routes["trackers"].mock(return_value=httpx.Response(200, json={"trackers": [
+        {"transaction_id": written["capture_id"], "tracking_number": written["tracking_number"], "status": "SHIPPED"}]}))
+    *_, reply = check_in_chat(h)
+    assert reply["reply"].startswith(f"WAIT: {scam_check.POLICY['P.WAIT_SHIPPED']}")
+    # the check reads the tracking of the same capture the demo wrote it to
+    assert api.routes["trackers"].calls.last.request.url.params["transaction_id"] == written["capture_id"]
+
+
+def test_d39_an_id_before_the_price_is_looked_up_and_counts_as_one(api, demo_db, choice, llm_stub):
+    """RECHECK #31: the price looks the held ID up with payment_check, a check with no Groq call and no screenshot.
+    held tells the page that the chips must wait."""
+    h = start()
+    sid = h["X-Demo-Session"]
+    early = said(h, f"Can you check this status for me ? {TID}")
+    assert (early["route"], early["held"]) == ("start_check", True)
+    assert demo.runs_check(sid, "45.00 USD") == ["check"] and demo.runs_check(sid, "cancel") == []
+    capture(api, httpx.Response(200, json=USD_PAID))
+    *steps, reply = lines(say(h, "45.00 USD"))
+    assert (reply["route"], reply["held"]) == ("check", False) and choice.prompts == []
+    assert reply["reply"].startswith("VERIFIED_WITH_WARNINGS: ") and chat.PAYMENT_ONLY in reply["reply"]
+    nodes = [s for s in steps if s["type"] == "node"]
+    assert [s["node"] for s in nodes] == ["ingest_input", "extract_claims", "verify_payment", "compute_verdict",
+                                          "safe_template", "persist_case"]
+    assert demo_db[sid]["cases"] == [nodes[0]["update"]["case_id"]]  # so ending the session deletes it
+    assert [len(ratelimit._hits[("1.1.1.1", k)]) for k in ("check", "screenshot")] == [1, 0]
+    llm_stub.transcript = "Buyer: paid"
+    assert said(h, "", "iVBORw0KGgoAAAAAAAAAAA==")["held"] is True  # a screenshot before the price
+
+
+def test_d40_ask_for_a_person_at_the_chat_step_runs_no_check(demo_db, choice, monkeypatch):
+    """The page's button sends operator, which at the chat step was checked as the buyer's chat (review of 2026-11-02)."""
+    monkeypatch.setattr(scam_check, "run", lambda *args: pytest.fail("no check"))
+    h = start()
+    say(h, "check")
+    say(h, "45.00 USD")
+    assert demo.runs_check(h["X-Demo-Session"], "operator") == []
+    r = said(h, "operator")  # without OPERATOR_TOKEN: the reply Studio gets, and the check ends
+    assert (r["route"], r["awaiting"]) == ("handoff", None) and not ratelimit._hits[("1.1.1.1", "check")]
+
+
+def test_d41_a_restart_that_forgot_the_chat_says_so(demo_db, choice):
+    """The thread is in memory, the session in Postgres: a price sent after a restart got the intro without a word."""
+    h = start()
+    say(h, "check")
+    demo.chat_graph.checkpointer.delete_thread(h["X-Demo-Session"])  # what a restart leaves: the session, no thread
+    choice.intent = "other"
+    r = said(h, "45.00 USD")
+    assert r["reply"] == f"{chat.RESTARTED}{chat.RESTARTED_CHECK}\n\n{chat.SCOPE}"  # greeted again: not the intro
+    assert r["awaiting"] is None and said(h, "Hi")["reply"] == chat.SCOPE  # said once
+    for message in ("check", "3Y662965014333303"):  # this message started one: no "say check"
+        demo.chat_graph.checkpointer.delete_thread(h["X-Demo-Session"])
+        r = said(h, message)
+        assert r["reply"].startswith(f"{chat.RESTARTED}\n\n") and r["awaiting"] == "price"
+
+
+def test_d41_a_restart_during_a_handoff_still_relays_a_screenshot_unread(demo_db, choice, monkeypatch):
+    """consented is in the thread, which a restart forgets; the handoff is in Postgres. The screenshot was counted, and
+    stored in the handoff with its image (review of 2026-11-03)."""
+    monkeypatch.setattr(demo, "OPERATOR_TOKEN", TOKEN)
+    h = start()
+    say(h, "operator")
+    say(h, "yes")
+    demo.chat_graph.checkpointer.delete_thread(h["X-Demo-Session"])
+    assert lines(say(h, "", "iVBORw0KGgoAAAAAAAAAAA==")) == [{"type": "relayed"}]
+    assert not ratelimit._hits[("1.1.1.1", "screenshot")]
+    (row,) = demo_db[h["X-Demo-Session"]]["handoffs"]
+    assert row["transcript"][-1] == {"who": "seller", "text": "[screenshot, not read]"}

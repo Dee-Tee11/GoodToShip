@@ -152,17 +152,11 @@ class ChatIn(BaseModel):
 def _chat(body: ChatIn, request: Request, session_id: str, held: ExitStack, put) -> None:
     """The whole message, in a thread of its own, holding the session's busy() until its end: it finishes even if the
     page goes away, so a check whose payment PayPal's claim took is always saved in the chat's thread. A message that
-    runs a scam check (the buyer's chat, after the price) counts as a check and takes a slot, as
-    chat.runs_scam_check asks. An hourly limit or no free slot is an error line."""
+    runs a check, or has a screenshot read, takes those limits and a slot (demo.runs_check). An hourly limit or no free
+    slot is an error line, and nothing is held."""
     with held:  # one message at a time: the thread can't change between the decision and the turn
         try:
             runs_check = demo.runs_check(session_id, body.message, body.image)
-            if "screenshot" in runs_check and body.image is None:  # the held one: every price would run it again
-                try:
-                    ratelimit.hit(request, "screenshot", count=False)
-                except HTTPException as e:
-                    raise HTTPException(429, f"{e.detail}. Your screenshot is still waiting for the price: to check "
-                                        "now, type cancel, say check, and paste the buyer's chat as text", e.headers)
             ratelimit.hit(request, "message", *runs_check)
             with _slot() if runs_check else nullcontext():
                 for line in demo.chat_turn(session_id, body.message, body.image, runs_check):
