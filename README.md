@@ -10,7 +10,13 @@ Built for the PayPal AI Hackathon (deadline 12 Nov 2026, 20:00 Lisbon). PayPal S
 
 ## The problem
 
-Payment scams hit sellers before shipping: a fake "payment sent" email, an overpayment with a request to refund the difference, a payment already used for an earlier order, a screenshot of a payment that doesn't exist. The seller has a chat, a screenshot and a few minutes to decide. PayPal has the facts, but nobody reads them for the seller.
+Payment scams hit sellers before shipping: a fake "payment sent" email, an overpayment with a request to refund the difference, a payment already used for an earlier order, a screenshot of a payment that doesn't exist. Once the item ships, it's gone.
+
+The losses are real and documented. In the UK alone, the police's Action Fraud unit counted about **£7.9M lost to fake PayPal emails from January to September 2020** ([Action Fraud, 2020](https://www.actionfraud.police.uk/alert/fake-paypal-emails-lead-to-nearly-8-million-in-losses-this-year)), after **£1.12M in the last quarter of 2019** ([Action Fraud, 2019](https://www.actionfraud.police.uk/alert/fake-paypal-emails-lead-to-over-1-million-in-losses); [Computer Weekly](https://www.computerweekly.com/news/252477940/Scammers-using-fake-PayPal-emails-stole-over-1m-in-the-UK-in-last-quarter)). Sellers on the [eBay community forum](https://community.ebay.com/t5/Selling/Scam-buyer/m-p/31183904) describe the same story: an email that looked like PayPal, an item shipped, no money.
+
+It is getting harder to spot by eye. In 2026 scammers sent fake purchase notices through **genuine PayPal emails** ([Malwarebytes, April 2026](https://www.malwarebytes.com/blog/news/2026/04/more-paypal-emails-hijacked-to-deliver-tech-support-scams)), and phishing overall reached **1,069,681 attacks in Q2 2026**, its highest level in years ([APWG Q2 2026](https://docs.apwg.org/reports/apwg_trends_report_q2_2026.pdf)). A sender check or a careful look at the email no longer settles it.
+
+The seller has a chat, a screenshot and a few minutes to decide. PayPal has the facts, but nobody reads them for the seller. GoodToShip does.
 
 ## What it does
 
@@ -31,6 +37,13 @@ Seller ──► chat ──► scam_check ──► PayPal REST (reads only)
 ```
 
 Three LangGraph graphs on FastAPI, deployed on Render, with Postgres on Neon. The verdict table, the chat's routing and every number the seller reads are plain code.
+
+## Tools used
+
+- **PayPal (the core).** REST sandbox: Transaction Search (`/v1/reporting/transactions`) and Payments v2 captures to check the payment the buyer claims; Tracking (`/v1/shipping/trackers`) to see if it already shipped; `verify-webhook-signature` for webhooks. The demo also uses Orders v2 (create, capture) to play the buyer. Everything in the graphs is a read.
+- **AI: Groq, `openai/gpt-oss-120b`** (strict JSON-schema output) finds warning signs in the chat, routes the chat's intent and writes at most 1 to 3 checked sentences. `qwen/qwen3.8-27b` reads screenshots. **LangGraph** runs the three graphs; **LangSmith** traces them (EU, made-up chats only).
+- **Tavily** searches PayPal's own pages when no verified note matches (optional).
+- **Sponsor: Render** hosts the live demo (`render.yaml`); Postgres is on Neon.
 
 ## Decisions and why
 
