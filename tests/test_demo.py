@@ -116,7 +116,7 @@ def lines(r):
 
 
 def test_d01_off_by_default():
-    for method, path in [("GET", "/demo"), ("POST", "/demo/api/session"), ("POST", "/demo/api/chat"),
+    for method, path in [("GET", "/"), ("GET", "/demo"), ("POST", "/demo/api/session"), ("POST", "/demo/api/chat"),
                          ("GET", "/demo/api/operator/handoffs")]:
         assert client.request(method, path, json={"message": "hi"}).status_code == 404
 
@@ -136,6 +136,8 @@ def test_d03_session_gives_the_page_what_it_needs(demo_db):
     assert r["client_id"] == "test-id" and r["buyer_email"] == "buyer@example.com" and r["currency"] == "USD"
     assert "CANARY" not in json.dumps(r)  # the client id is public; the secret never leaves the server
     assert client.get("/demo").headers["content-type"].startswith("text/html")
+    root = client.get("/", follow_redirects=False)  # the service's bare URL opens the demo
+    assert root.status_code == 307 and root.headers["location"] == "/demo"
 
 
 @pytest.mark.parametrize("headers", [{}, {"X-Demo-Session": "gone"}], ids=["none", "ended"])

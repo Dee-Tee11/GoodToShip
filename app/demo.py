@@ -20,7 +20,7 @@ from pathlib import Path
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from fastapi import Path as UrlPath
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, RedirectResponse
 from langchain_core.messages import RemoveMessage
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph.message import REMOVE_ALL_MESSAGES
@@ -105,6 +105,11 @@ class SaleIn(BaseModel):
 @router.get("/demo", include_in_schema=False)
 def page():
     return FileResponse(PAGE)
+
+
+@router.get("/", include_in_schema=False)
+def root():  # the service's bare URL opens the demo; 404 like every demo route when DEMO_MODE is off
+    return RedirectResponse("/demo")
 
 
 @router.post("/demo/api/session")
