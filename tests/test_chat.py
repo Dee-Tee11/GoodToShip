@@ -1,4 +1,4 @@
-"""The chat graph, offline: Groq stubbed like llm_stub, Tavily and PayPal mocked with respx. IDs are in the README."""
+"""The chat graph, offline: Groq stubbed like llm_stub, Tavily and PayPal mocked with respx. IDs are in docs/DETAILS.md."""
 import base64
 import importlib
 import json
