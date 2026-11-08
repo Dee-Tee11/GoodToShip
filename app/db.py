@@ -176,7 +176,7 @@ def add_handoff(session_id: str, transcript: list[dict], last_case: dict | None)
 def relay(session_id: str, said: dict) -> bool:
     """True if the session has an open handoff, which now ends with what the seller said. One statement: an answer
     appended at the same moment is never lost."""
-    # ponytail: one more connection per demo message with OPERATOR_TOKEN, shared or not; fold it into
+    # ponytail: one more connection per demo message, shared or not; fold it into
     # touch_demo_session's statement if Neon's round trip shows
     with _connect() as c:
         return c.execute("UPDATE handoffs SET transcript = transcript || %s, updated_at = now() "
@@ -190,21 +190,21 @@ def handoff_open(session_id: str) -> bool:
                          (session_id,)).fetchone()[0]
 
 
-def open_handoffs() -> list[dict]:
-    """Every session's open handoff, oldest first, for the operator. Never the session id: it is the session's key."""
+def open_handoffs(session_id: str) -> list[dict]:
+    """This session's open handoff, for the simulated operator on its own page. Never the session id."""
     with _connect() as c:
         rows = c.execute("SELECT id, transcript, last_case, shared_at, updated_at FROM handoffs WHERE status = 'open' "
-                         "ORDER BY shared_at").fetchall()
+                         "AND session_id = %s ORDER BY shared_at", (session_id,)).fetchall()
     return [{"id": r[0], "transcript": r[1], "last_case": r[2], "shared_at": r[3].isoformat(),
              "updated_at": r[4].isoformat()} for r in rows]
 
 
-def answer_handoff(handoff_id: int, reply: str) -> bool:
-    """True if the handoff is open, and now ends with this answer, in its transcript and its replies."""
+def answer_handoff(handoff_id: int, reply: str, session_id: str) -> bool:
+    """True if the handoff is this session's and open, and now ends with this answer, in its transcript and replies."""
     with _connect() as c:
         return c.execute("UPDATE handoffs SET transcript = transcript || %s, replies = replies || %s, updated_at = now() "
-                         "WHERE id = %s AND status = 'open'",
-                         (Jsonb([{"who": "operator", "text": reply}]), Jsonb([reply]), handoff_id)).rowcount == 1
+                         "WHERE id = %s AND session_id = %s AND status = 'open'",
+                         (Jsonb([{"who": "operator", "text": reply}]), Jsonb([reply]), handoff_id, session_id)).rowcount == 1
 
 
 def open_handoff_session(handoff_id: int) -> str | None:

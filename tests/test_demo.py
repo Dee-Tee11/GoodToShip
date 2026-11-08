@@ -53,11 +53,13 @@ def demo_db(monkeypatch):
             row.update(transcript=[*row["transcript"], said], updated_at=next(stamps))
         return bool(row)
 
-    def answer_handoff(hid, reply):
-        if row := open_row(hid=hid)[1]:
-            row.update(transcript=[*row["transcript"], {"who": "operator", "text": reply}],
-                       replies=[*row["replies"], reply], updated_at=next(stamps))
-        return bool(row)
+    def answer_handoff(hid, reply, sid):
+        owner, row = open_row(hid=hid)
+        if owner is None or owner != sid:  # only the session's own open handoff
+            return False
+        row.update(transcript=[*row["transcript"], {"who": "operator", "text": reply}],
+                   replies=[*row["replies"], reply], updated_at=next(stamps))
+        return True
 
     def close_handoff(sid, hid=None):
         if (row := open_row(sid)[1]) and hid in (None, row["id"]):
@@ -71,9 +73,9 @@ def demo_db(monkeypatch):
     monkeypatch.setattr(db, "answer_handoff", answer_handoff)
     monkeypatch.setattr(db, "open_handoff_session", lambda hid: open_row(hid=hid)[0])
     monkeypatch.setattr(db, "close_handoff", close_handoff)
-    monkeypatch.setattr(db, "open_handoffs", lambda: [
+    monkeypatch.setattr(db, "open_handoffs", lambda sid: [
         {k: r[k] for k in ("id", "transcript", "last_case", "shared_at", "updated_at")}
-        for s in sessions.values() for r in s["handoffs"] if r["status"] == "open"])
+        for s, v in sessions.items() for r in v["handoffs"] if r["status"] == "open" and s == sid])
     monkeypatch.setattr(db, "touch_demo_session", lambda sid: sid in sessions)
     monkeypatch.setattr(db, "end_demo_sessions", lambda sid=None: [sid] if sid and sessions.pop(sid, None) else [])
     monkeypatch.setattr(db, "add_demo_sale", lambda sid, oid, item, amount: sessions[sid]["sales"].update(
@@ -342,12 +344,10 @@ def test_d17_a_screenshot_in_the_chat_runs_the_check_and_counts_as_one(demo_db, 
 
 FAKE = {"case_id": "c1", "verdict": "WAIT", "policy_id": "P.WAIT_NOT_CONFIRMED", "message": "m", "sentences": [],
         "steps": ["s"], "support": "help", "evidence": {"E1": {}}, "signals_checked": True, "persisted": True}
-TOKEN = "t" * 40
 
 
 def test_d20_only_a_yes_hands_the_whole_conversation_over(demo_db, choice, llm_stub, monkeypatch):
     llm_stub.transcript = "Buyer: paid"
-    monkeypatch.setattr(demo, "OPERATOR_TOKEN", TOKEN)
     monkeypatch.setattr(chat, "TAVILY_KEY", "")
     monkeypatch.setattr(scam_check, "run", lambda *args: FAKE)
     h, png = start(), "iVBORw0KGgoAAAAAAAAAAA=="
@@ -391,7 +391,6 @@ def test_d20_only_a_yes_hands_the_whole_conversation_over(demo_db, choice, llm_s
 
 
 def test_d21_ending_or_sweeping_the_session_forgets_its_transcript(demo_db, choice, monkeypatch):
-    monkeypatch.setattr(demo, "OPERATOR_TOKEN", TOKEN)
     ended, idle = start(), start()
     for h in (ended, idle):
         say(h, "hello")
@@ -403,7 +402,6 @@ def test_d21_ending_or_sweeping_the_session_forgets_its_transcript(demo_db, choi
 
 
 def test_d22_a_handoff_the_database_refuses_leaves_no_sent_behind(demo_db, choice, monkeypatch):
-    monkeypatch.setattr(demo, "OPERATOR_TOKEN", TOKEN)
     h = start()
     say(h, "operator")
 
@@ -420,27 +418,28 @@ OPERATOR = [("GET", "/demo/api/operator/handoffs", None), ("POST", "/demo/api/op
             ("POST", "/demo/api/operator/handoffs/1/close", None)]
 
 
-def test_d24_the_operator_api_needs_its_token_in_a_header(demo_db, monkeypatch):
-    called = []
-    monkeypatch.setattr(db, "open_handoffs", lambda: called.append("open") or [])
-    monkeypatch.setattr(db, "answer_handoff", lambda hid, reply: called.append("answer"))
-    for method, path, body in OPERATOR:  # no OPERATOR_TOKEN: there is no operator API
-        assert client.request(method, path, json=body, headers={"X-Operator-Token": TOKEN}).status_code == 404
-    h = start()  # made without a token: the page asks the server each poll, never its saved session
-    state = client.get("/demo/api/state", headers=h).json()
-    assert state["operators"] is False and state["intro"] == chat.intro(False)
-    monkeypatch.setattr(demo, "OPERATOR_TOKEN", TOKEN)
-    for method, path, body in OPERATOR:
-        for headers in ({}, {"X-Operator-Token": "x" * 40}):
-            assert client.request(method, path, json=body, headers=headers).status_code == 401
-        assert client.request(method, f"{path}?token={TOKEN}", json=body).status_code == 401  # never in a URL
-    state = client.get("/demo/api/state", headers=h).json()
-    assert not called and state["operators"] is True and state["intro"] == chat.intro(True)  # what a reload shows
+def test_d24_the_simulated_operator_sees_only_its_own_sessions_shared_chat(demo_db, choice):
+    """No token since 2026-11-08: the tester plays the person from GoodToShip on their own page. The operator API
+    needs the demo session, and another session's shared chat can't be listed, answered or closed."""
+    for method, path, body in OPERATOR:  # no session: 401, as every demo route
+        assert client.request(method, path, json=body).status_code == 401
+    mine, other = start(), start()
+    assert client.get("/demo/api/state", headers=mine).json()["operators"] is True
+    for h in (mine, other):
+        say(h, "operator")
+        say(h, "yes")
+    (shared,) = client.get("/demo/api/operator/handoffs", headers=mine).json()
+    (theirs,) = client.get("/demo/api/operator/handoffs", headers=other).json()
+    assert shared["id"] != theirs["id"]
+    for path, body in (("reply", {"reply": "Hi"}), ("close", None)):  # another tester's: as if it were closed
+        r = client.post(f"/demo/api/operator/handoffs/{theirs['id']}/{path}", json=body, headers=mine)
+        assert (r.status_code, r.json()["detail"]) == (409, demo.GONE)
+    assert client.get("/demo/api/operator/handoffs", headers=other).json()[0]["transcript"] == theirs["transcript"]
 
 
 def test_d25_a_persons_answers_reach_the_seller_but_never_the_graph(demo_db, choice, monkeypatch):
-    monkeypatch.setattr(demo, "OPERATOR_TOKEN", TOKEN)
-    op, h = {"X-Operator-Token": TOKEN}, start()
+    h = start()
+    op = h  # the tester answers as the operator from their own page
     say(h, "operator")
     say(h, "yes")
     (shared,) = client.get("/demo/api/operator/handoffs", headers=op).json()
@@ -463,51 +462,17 @@ def test_d25_a_persons_answers_reach_the_seller_but_never_the_graph(demo_db, cho
     assert "Ana" not in json.dumps(values, default=str) and all("Ana" not in c.user for c in choice.calls)
 
 
-def test_d26_a_short_operator_token_never_starts(demo_db, monkeypatch):
-    monkeypatch.setattr(demo, "OPERATOR_TOKEN", "t" * 31)
-    with pytest.raises(RuntimeError, match="OPERATOR_TOKEN"), TestClient(main.app):
-        pass
-
-
-def test_d27_without_an_operator_token_no_person_is_offered_and_nothing_is_kept(api, llm_stub, demo_db, choice,
-                                                                                 monkeypatch):
-    monkeypatch.setattr(chat, "TAVILY_KEY", "")
-    h = start()
-    choice.intent = "question"
-    assert chat.OFFER_OPERATOR not in said(h, "Can I sell gift cards?")["reply"]
-    assert chat.DEMO_ONLY in said(h, "operator")["reply"]
-    assert chat.SHARED not in said(h, "yes")["reply"]
-    capture(api, httpx.Response(200, json=USD_PAID))
-    check_in_chat(h)
-    assert h["X-Demo-Session"] not in demo._transcripts and not demo_db[h["X-Demo-Session"]]["handoffs"]
-
-
-def test_d28_ten_wrong_operator_tokens_lock_the_address_out(demo_db, monkeypatch):
-    monkeypatch.setattr(demo, "OPERATOR_TOKEN", TOKEN)
-    monkeypatch.setattr(db, "open_handoffs", lambda: [])
-    path = "/demo/api/operator/handoffs"
-    for _ in range(3):  # the page polls every 4 s: the right token never counts
-        assert client.get(path, headers={"X-Operator-Token": TOKEN}).status_code == 200
-    for _ in range(10):
-        assert client.get(path, headers={"X-Operator-Token": "x" * 40}).status_code == 401
-    r = client.get(path, headers={"X-Operator-Token": TOKEN})  # refused before the compare: a guess learns nothing
-    assert r.status_code == 429 and "wrong tokens" in r.json()["detail"]
-
-
 def test_d29_goodtoship_speaks_first(demo_db, choice, monkeypatch):
     s = client.post("/demo/api/session").json()
-    assert s["intro"] == chat.intro(False)  # no OPERATOR_TOKEN: no person is offered
+    assert s["intro"] == chat.intro(True) and s["intro"].endswith(chat.PERSON)
     assert demo.chat_graph.get_state(demo._thread(s["session_id"])).values["greeted"] is True
     choice.intent = "other"
     assert said({"X-Demo-Session": s["session_id"]}, "Hi")["reply"] == chat.SCOPE  # not the intro again
-    monkeypatch.setattr(demo, "OPERATOR_TOKEN", TOKEN)
-    s = client.post("/demo/api/session").json()
-    assert s["intro"] == chat.intro(True) and s["intro"].endswith(chat.PERSON)
-    assert s["session_id"] not in demo._transcripts  # fixed text, nothing of the seller's: never shared
+    assert demo._transcripts[s["session_id"]] == [  # the intro, fixed text, is never shared
+        {"who": "seller", "text": "Hi"}, {"who": "goodtoship", "text": chat.SCOPE}]  # fixed text, nothing of the seller's: never shared
 
 
 def test_d30_while_a_person_has_the_conversation_goodtoship_never_answers(demo_db, choice, monkeypatch):
-    monkeypatch.setattr(demo, "OPERATOR_TOKEN", TOKEN)
     monkeypatch.setattr(scam_check, "run", lambda *args: pytest.fail("no check while a person has it"))
     h = start()
     say(h, "operator")
@@ -526,9 +491,9 @@ def test_d30_while_a_person_has_the_conversation_goodtoship_never_answers(demo_d
 
 @pytest.mark.parametrize("closer", ["operator", "seller"])
 def test_d31_closing_deletes_what_the_person_saw_and_starts_the_chat_over(demo_db, choice, monkeypatch, closer):
-    monkeypatch.setattr(demo, "OPERATOR_TOKEN", TOKEN)
     monkeypatch.setattr(chat, "TAVILY_KEY", "")
-    op, h = {"X-Operator-Token": TOKEN}, start()
+    h = start()
+    op = h  # the tester answers as the operator from their own page
     sid = h["X-Demo-Session"]
     assert client.post("/demo/api/handoff/close", headers=h).status_code == 409  # nothing shared yet
     choice.intent = "question"
@@ -548,9 +513,6 @@ def test_d31_closing_deletes_what_the_person_saw_and_starts_the_chat_over(demo_d
     assert row["transcript"] == [] and row["last_case"] is None  # what the person saw is deleted
     assert client.get("/demo/api/state", headers=h).json()["handoffs"] == [
         {"id": shared["id"], "status": "closed", "replies": ["Hi"], "notice": f"{chat.CLOSED}\n\n{chat.intro(True)}"}]
-    monkeypatch.setattr(demo, "OPERATOR_TOKEN", "")  # restarted without it: the notice no longer says "say operator"
-    assert client.get("/demo/api/state", headers=h).json()["handoffs"][0]["notice"] == f"{chat.CLOSED}\n\n{chat.intro(False)}"
-    monkeypatch.setattr(demo, "OPERATOR_TOKEN", TOKEN)
     assert sid not in demo._transcripts and demo.chat_graph.get_state(demo._thread(sid)).values == {
         "messages": [], "greeted": True}  # as a new session's
     choice.intent = "other"
@@ -582,8 +544,8 @@ def test_d32_a_check_cut_short_is_still_saved_in_the_chat(api, llm_stub, demo_db
 
 
 def test_d33_the_persons_close_closes_only_the_card_they_clicked(demo_db, choice, monkeypatch):
-    monkeypatch.setattr(demo, "OPERATOR_TOKEN", TOKEN)
-    op, h = {"X-Operator-Token": TOKEN}, start()
+    h = start()
+    op = h  # the tester answers as the operator from their own page
     sid = h["X-Demo-Session"]
     say(h, "operator")
     say(h, "yes")
@@ -748,8 +710,8 @@ def test_d40_ask_for_a_person_at_the_chat_step_runs_no_check(demo_db, choice, mo
     say(h, "check")
     say(h, "45.00 USD")
     assert demo.runs_check(h["X-Demo-Session"], "operator") == []
-    r = said(h, "operator")  # without OPERATOR_TOKEN: the reply Studio gets, and the check ends
-    assert (r["route"], r["awaiting"]) == ("handoff", None) and not ratelimit._hits[("1.1.1.1", "check")]
+    r = said(h, "operator")  # the check ends and the consent question comes
+    assert (r["route"], r["awaiting"]) == ("handoff", "consent") and not ratelimit._hits[("1.1.1.1", "check")]
 
 
 def test_d41_a_restart_that_forgot_the_chat_says_so(demo_db, choice):
@@ -770,7 +732,6 @@ def test_d41_a_restart_that_forgot_the_chat_says_so(demo_db, choice):
 def test_d41_a_restart_during_a_handoff_still_relays_a_screenshot_unread(demo_db, choice, monkeypatch):
     """consented is in the thread, which a restart forgets; the handoff is in Postgres. The screenshot was counted, and
     stored in the handoff with its image (review of 2026-11-03)."""
-    monkeypatch.setattr(demo, "OPERATOR_TOKEN", TOKEN)
     h = start()
     say(h, "operator")
     say(h, "yes")

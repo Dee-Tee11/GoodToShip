@@ -233,7 +233,7 @@ CLOSED = ("The conversation with GoodToShip's team is closed, and what they saw 
 RESTARTED = "I restarted and lost our conversation up to this message."
 RESTARTED_CHECK = " If you had started a check, say check to start it again."
 NOT_SHARED = "OK, nothing was shared. If you meant to ask or check something, send it again."
-DEMO_ONLY = "Talking to a person from GoodToShip isn't available here for now."  # Studio, evals, a demo without OPERATOR_TOKEN
+DEMO_ONLY = "Talking to a person from GoodToShip isn't available here for now."  # Studio and the evals: only the demo offers a person
 # only the demo's run carries it, as context={"live": LIVE}: then check streams scam_check's steps to the page. An object,
 # not a flag: Studio and the API take a run's context as JSON, which can't hold it
 LIVE = object()

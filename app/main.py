@@ -33,8 +33,6 @@ async def lifespan(_):
         raise RuntimeError(f"missing env vars: {', '.join(missing)}")
     if demo.ENABLED and ".sandbox." not in paypal.BASE:  # the demo pays with a shared account: never with real money
         raise RuntimeError("DEMO_MODE needs PayPal's sandbox (PAYPAL_BASE_URL)")
-    if demo.ENABLED and demo.OPERATOR_TOKEN and len(demo.OPERATOR_TOKEN) < 32:  # it shows sellers' shared chats
-        raise RuntimeError("OPERATOR_TOKEN must be at least 32 characters")
     db.init()
     if demo.ENABLED:
         db.end_demo_sessions()  # sessions that went idle while the service slept

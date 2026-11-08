@@ -97,14 +97,16 @@ def test_a_handoff_takes_messages_and_answers_until_it_is_closed():
         db.add_handoff(sid, [{"who": "seller", "text": "again"}], None)
     (first,) = db.demo_state(sid)["handoffs"]
     assert db.relay(sid, {"who": "seller", "text": "still there?"})
-    assert db.answer_handoff(first["id"], "Hi, Ana from GoodToShip here.") and db.answer_handoff(first["id"], "Yes.")
-    (listed,) = [h for h in db.open_handoffs() if h["id"] == first["id"]]
+    assert not db.answer_handoff(first["id"], "Not mine.", "another-session")  # only the session's own handoff
+    assert db.answer_handoff(first["id"], "Hi, Ana from GoodToShip here.", sid) and db.answer_handoff(first["id"], "Yes.", sid)
+    (listed,) = db.open_handoffs(sid)
+    assert db.open_handoffs("another-session") == []
     assert [t["text"] for t in listed["transcript"]] == ["operator", "still there?", "Hi, Ana from GoodToShip here.", "Yes."]
     assert "session_id" not in listed and listed["updated_at"] > listed["shared_at"]
     assert db.open_handoff_session(first["id"]) == sid and db.handoff_open(sid)
     assert not db.close_handoff(sid, first["id"] + 1)  # the person's Close: only the card they clicked
     assert db.close_handoff(sid, first["id"]) and not db.close_handoff(sid)
-    assert not db.relay(sid, {"who": "seller", "text": "late"}) and not db.answer_handoff(first["id"], "late")
+    assert not db.relay(sid, {"who": "seller", "text": "late"}) and not db.answer_handoff(first["id"], "late", sid)
     assert db.open_handoff_session(first["id"]) is None and not db.handoff_open(sid)
     with db._connect() as c:  # what the person saw is deleted
         assert c.execute("SELECT transcript, last_case FROM handoffs WHERE id = %s", (first["id"],)).fetchone() == ([], None)

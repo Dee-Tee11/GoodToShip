@@ -32,15 +32,13 @@ log = logging.getLogger(__name__)
 ENABLED = os.getenv("DEMO_MODE", "").strip().lower() == "true"
 REQUIRED_ENV = ("DEMO_BUYER_EMAIL", "DEMO_BUYER_PASSWORD")
 CURRENCY = "USD"  # a US sandbox business account, as in the README's Seller Protection notes
-# the people who answer handoffs share it; off when unset. main.lifespan refuses one under 32 characters
-OPERATOR_TOKEN = os.getenv("OPERATOR_TOKEN", "").strip()
 MAX_REPLY = 2000
 PAGE = Path(__file__).parent / "static" / "demo.html"
 # the chat graph with one thread per demo session (thread_id = session id), forgotten when the session ends. Each turn
 # leaves only its latest state, without its messages (_keep_latest).
 # ponytail: in memory, so a restart or Render's sleep forgets every conversation; PostgresSaver if they must survive one
 chat_graph = chat._build(InMemorySaver())
-# each session's conversation, for a handoff, kept only with OPERATOR_TOKEN: what the seller sent (a screenshot only
+# each session's conversation, for a handoff: what the seller sent (a screenshot only
 # when it was read) and every reply. Outside the graph, so InMemorySaver doesn't copy it into every checkpoint.
 # ponytail: no cap; 30 messages and 3 read screenshots an hour per IP bound how fast it grows, and db.DEMO_MAX for
 # how long (a session ends 2 hours after it started, even with its tab open)
@@ -73,17 +71,6 @@ def busy(session_id: str, taken: str = "your last message is still running, wait
         yield
     finally:
         _busy.discard(session_id)
-
-
-def operator(request: Request, x_operator_token: str = Header("", max_length=256)) -> None:
-    """A person from GoodToShip: the shared OPERATOR_TOKEN, in a header only, never in a URL. 404 when it isn't set,
-    401 for a wrong one, before any database call; an address at its limit of wrong ones is a 429, the right one too."""
-    if not OPERATOR_TOKEN:
-        raise HTTPException(404)
-    ratelimit.hit(request, "wrong token", count=False)  # before the compare, or a 200 would still tell a guess apart
-    if not secrets.compare_digest(x_operator_token.encode(), OPERATOR_TOKEN.encode()):
-        ratelimit.hit(request, "wrong token")  # only a wrong one counts: the page polls every 4 s
-        raise HTTPException(401, "wrong operator token")
 
 
 def turn(x_demo_session: str = Header("", max_length=64)):
@@ -121,7 +108,7 @@ def new_session(request: Request):
     _greet(session_id)  # no busy(): nobody has this id yet
     return {"session_id": session_id, "client_id": os.environ["PAYPAL_CLIENT_ID"], "currency": CURRENCY,
             "buyer_email": os.environ["DEMO_BUYER_EMAIL"], "buyer_password": os.environ["DEMO_BUYER_PASSWORD"],
-            "intro": chat.intro(bool(OPERATOR_TOKEN))}  # not in the transcript: fixed text, nothing of the seller's
+            "intro": chat.intro(True)}  # not in the transcript: fixed text, nothing of the seller's
 
 
 def _paypal_error(r, what: str) -> HTTPException:
@@ -217,14 +204,14 @@ def ship_order(order_id: str, request: Request, session_id: str = Depends(sessio
 def state(session_id: str = Depends(session)):
     out = db.demo_state(session_id)
     # live, not saved with the session: the page shows its operator section, and the intro offers a person, only then
-    intro = chat.intro(bool(OPERATOR_TOKEN))
+    intro = chat.intro(True)
     for h in out["handoffs"]:  # the page shows it once, where the chat started over
         if h["status"] == "closed":
             h["notice"] = f"{chat.CLOSED}\n\n{intro}"
     # what the chat waits for, so a reloaded page never sends a dispute ID as the buyer's chat (it reads memory only)
     awaiting = chat_graph.get_state(_thread(session_id)).values.get("awaiting")
     # practice: the Practice disputes tab's fictional scenarios, from a file, any session's
-    return {**out, "operators": bool(OPERATOR_TOKEN), "intro": intro, "practice": dispute_draft.cards(),
+    return {**out, "operators": True, "intro": intro, "practice": dispute_draft.cards(),
             "awaiting": awaiting}
 
 
@@ -234,10 +221,12 @@ def end(session_id: str = Depends(turn, scope="function")):
     return {"ended": True}
 
 
-@router.get("/demo/api/operator/handoffs", dependencies=[Depends(operator)])
-def operator_handoffs():
-    """Every session's open handoff: its transcript and last check's codes, never the session id."""
-    return db.open_handoffs()
+# The operator is simulated (2026-11-08): the tester plays the person from GoodToShip on their own page, so each
+# session sees and answers only its own shared conversation, never another tester's. No token.
+@router.get("/demo/api/operator/handoffs")
+def operator_handoffs(session_id: str = Depends(session)):
+    """This session's open handoff: its transcript and last check's codes, never the session id."""
+    return db.open_handoffs(session_id)
 
 
 class ReplyIn(BaseModel):
@@ -247,18 +236,19 @@ class ReplyIn(BaseModel):
 GONE = "this conversation was closed, or its demo session ended"
 
 
-@router.post("/demo/api/operator/handoffs/{handoff_id}/reply", dependencies=[Depends(operator)])
-def operator_reply(body: ReplyIn, handoff_id: int = UrlPath(ge=1, le=2**63 - 1)):  # a bigint, or psycopg's 500
+@router.post("/demo/api/operator/handoffs/{handoff_id}/reply")
+def operator_reply(body: ReplyIn, handoff_id: int = UrlPath(ge=1, le=2**63 - 1),  # a bigint, or psycopg's 500
+                   session_id: str = Depends(session)):
     """A person's answer, written by a person, as many as they like while it is open: the seller's page shows each
     from demo_state, and none enters the graph."""
-    if not db.answer_handoff(handoff_id, body.reply):
+    if not db.answer_handoff(handoff_id, body.reply, session_id):
         raise HTTPException(409, GONE)
     return {"answered": True}
 
 
-@router.post("/demo/api/operator/handoffs/{handoff_id}/close", dependencies=[Depends(operator)])
-def operator_close(handoff_id: int = UrlPath(ge=1, le=2**63 - 1)):
-    if not (session_id := db.open_handoff_session(handoff_id)):
+@router.post("/demo/api/operator/handoffs/{handoff_id}/close")
+def operator_close(handoff_id: int = UrlPath(ge=1, le=2**63 - 1), session_id: str = Depends(session)):
+    if db.open_handoff_session(handoff_id) != session_id:  # another session's is "gone", as a closed one
         raise HTTPException(409, GONE)
     # never under one of the seller's messages: it could reach a half-wiped chat
     with busy(session_id, "the seller's last message is still on its way, try again in a moment"):
@@ -321,7 +311,7 @@ def runs_check(session_id: str, message: str, image: bytes | None = None) -> lis
     (chat.runs_scam_check), "screenshot" for a screenshot read now, held for the price or checked
     (chat.reads_screenshot). None while a person has the conversation: chat_turn relays the message, unread. Asked of
     Postgres, not of the thread's consented: a restart forgets the thread, not the handoff."""
-    if OPERATOR_TOKEN and db.handoff_open(session_id):
+    if db.handoff_open(session_id):
         return []
     values = chat_graph.get_state(_thread(session_id)).values
     return [*(["check"] if chat.runs_scam_check(values, message, image) else []),
@@ -331,7 +321,7 @@ def runs_check(session_id: str, message: str, image: bytes | None = None) -> lis
 def chat_turn(session_id: str, message: str, image: bytes | None, checks: list[str]):
     """One message through the chat graph, as main.demo_chat's lines: a check's PayPal calls and node updates as they
     happen, then the reply and how it was routed, for the live panel. checks is runs_check's answer, which
-    main._chat took inside the same busy(). With OPERATOR_TOKEN, the turn joins the session's transcript, and a
+    main._chat took inside the same busy(). The turn joins the session's transcript, and a
     yes to handoff's question hands the whole transcript to a person (db.add_handoff). While a person has it, the
     message goes to them only, as "relayed": no graph, no LLM, no check (the yes left nothing awaited, so checks is
     empty)."""
@@ -344,7 +334,7 @@ def chat_turn(session_id: str, message: str, image: bytes | None, checks: list[s
         said["image"] = url
     elif url:  # never read: dropped at the consent step, or by cancel
         said["text"] = f"{said['text']}\n[screenshot, not read]".strip()
-    if OPERATOR_TOKEN and db.relay(session_id, said):  # a database error fails closed: GoodToShip doesn't answer either
+    if db.relay(session_id, said):  # a database error fails closed: GoodToShip doesn't answer either
         yield {"type": "relayed"}
         return
     # the thread is in memory, the session in Postgres: after a restart (Render's sleep, a deploy, --reload) the page
@@ -360,9 +350,9 @@ def chat_turn(session_id: str, message: str, image: bytes | None, checks: list[s
     # ends; this clears what a turn the graph raised in left
     turn_input = {"messages": [RemoveMessage(id=REMOVE_ALL_MESSAGES), {"role": "user", "content": content}]}
     # the run's context, not configurable, so it isn't copied into the checkpoints. Only the demo has an operator page,
-    # and only with OPERATOR_TOKEN: without it nobody could answer, so no person is offered. LIVE: check streams its
+    # so only it offers a person. LIVE: check streams its
     # steps, only for a message that runs one: the custom stream moves every node onto LangGraph's background threads
-    context = {"operators": bool(OPERATOR_TOKEN), **({"live": chat.LIVE} if checks else {})}
+    context = {"operators": True, **({"live": chat.LIVE} if checks else {})}
     case_id = None
     # durability="exit": one checkpoint, as the run ends (an error too), not one per step with the screenshot in each
     for mode, chunk in chat_graph.stream(turn_input, _thread(session_id), context=context, durability="exit",
@@ -384,11 +374,10 @@ def chat_turn(session_id: str, message: str, image: bytes | None, checks: list[s
     if restarted:  # "say check" only when this message didn't start one, nor ask about sharing
         reply = f"{chat.RESTARTED}{'' if state.get('awaiting') else chat.RESTARTED_CHECK}\n\n{reply}"
     route =next(node for node in nodes if node != "classify")
-    if OPERATOR_TOKEN:  # no operator page, no transcript: nobody would read it
-        pair = [said, {"who": "goodtoship", "text": reply}]
-        if nodes.get("handoff", {}).get("consented"):  # the row holds everything so far, this turn too
-            db.add_handoff(session_id, [*_transcripts.get(session_id, []), *pair], (state.get("cases") or [None])[-1])
-        _transcripts.setdefault(session_id, []).extend(pair)  # after the row: a refused one leaves no "Sent" behind
+    pair = [said, {"who": "goodtoship", "text": reply}]
+    if nodes.get("handoff", {}).get("consented"):  # the row holds everything so far, this turn too
+        db.add_handoff(session_id, [*_transcripts.get(session_id, []), *pair], (state.get("cases") or [None])[-1])
+    _transcripts.setdefault(session_id, []).extend(pair)  # after the row: a refused one leaves no "Sent" behind
     classified = nodes.get("classify") or {}
     # held: screenshots or payment IDs wait for the price, so the page's scenario chips don't send one (demo.html)
     # dispute_id: the ID the dispute node read, so the live panel tells a read from an explanation. checklist: a

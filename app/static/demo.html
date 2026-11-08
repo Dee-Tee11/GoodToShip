@@ -244,13 +244,8 @@
         <p>Stuck, or want a second opinion? Ask in the chat for a person from GoodToShip, or say operator. Nothing is shared until you say yes; then a person reads your conversation and answers you in the chat. Press Stop sharing to end it.</p>
         <button class="btn quiet" id="ask-person" type="button">Ask for a person</button>
         <details class="team">
-          <summary>For GoodToShip's team: answer shared chats</summary>
-          <p class="caveat">The conversations sellers chose to share, from every demo session, each with an answer box. Paste the operator token to see them. It stays in this tab's memory only.</p>
-          <form class="ask" id="op-login">
-            <label class="sr-only" for="op-token">Operator token</label>
-            <input id="op-token" type="text" autocomplete="off" spellcheck="false" placeholder="Operator token">
-            <button class="btn" type="submit">Open</button>
-          </form>
+          <summary>Play the person from GoodToShip (simulation)</summary>
+          <p class="caveat">In this demo you play both sides. Once you share your conversation, it shows up here with an answer box: answer as the person from GoodToShip and your reply appears in your chat. Only your own conversation is shown, never another tester's.</p>
           <p class="note" id="op-note" role="status"></p>
           <ol class="handoffs" id="handoffs"></ol>
         </details>
@@ -836,8 +831,7 @@ async function send(message, typed = true) {
   }
 }
 
-// ---- the operator: a person from GoodToShip answers what sellers shared, from every session ----
-let operatorToken = "";  // this tab's memory only, sent in a header and never in a URL: a reload asks for it again
+// ---- the operator, simulated: the tester answers their own shared conversation, as the person from GoodToShip ----
 const cards = new Map();  // handoff id -> updated_at on screen: the polling redraws only a changed conversation
 let polled = "";  // the note the poll wrote last, taken back by a later poll if nothing wrote over it
 const seenOpen = new Set();  // the seller's handoffs this page saw open
@@ -845,17 +839,8 @@ const seenReplies = new Set();  // "id:n" operator answers and "id:closed" notic
 const IMAGE = /^data:image\/(png|jpeg);base64,[A-Za-z0-9+/=]+$/;  // what the server stores; anything else isn't shown
 const WHO = {seller: "Seller", goodtoship: "GoodToShip", operator: "Operator"};
 
-async function operatorApi(path, body) {  // not api(): a 401 here is a wrong token, not an ended session
-  const token = operatorToken;
-  const r = await fetch(path, {
-    method: body === undefined ? "GET" : "POST",
-    headers: {"X-Operator-Token": token, "Content-Type": "application/json"},
-    body: body === undefined ? undefined : JSON.stringify(body),
-  });
-  // a wrong token isn't sent again every few seconds; a late 401 for an older one leaves a newer one alone
-  if (r.status === 401 && operatorToken === token) operatorToken = "";
-  if (!r.ok) throw new Error(await problem(r));
-  return r.json();
+async function operatorApi(path, body) {  // this session's own handoff only, as every demo call
+  return (await api(path, body)).json();
 }
 
 function caseLine(c) {
@@ -907,9 +892,11 @@ function card(h) {
 }
 
 async function refreshOperator() {
-  if (!operatorToken) return;
+  if (!session || $("operator").hidden) return;
   let open;
-  try { open = await operatorApi("/demo/api/operator/handoffs"); } catch (e) { return note("op-note", polled = e.message, true); }
+  try { open = await operatorApi("/demo/api/operator/handoffs"); } catch (e) {
+    return e instanceof Ended ? undefined : note("op-note", polled = e.message, true);
+  }
   const ids = new Set(open.map((h) => h.id));
   for (const li of [...$("handoffs").children]) {
     if (!ids.has(Number(li.dataset.id))) { li.remove(); cards.delete(Number(li.dataset.id)); }
@@ -923,19 +910,9 @@ async function refreshOperator() {
     talk.scrollTop = talk.scrollHeight;  // the newest message in view
     cards.set(h.id, h.updated_at);
   }
-  if (!open.length) note("op-note", polled = "No shared conversations are waiting.");
+  if (!open.length) note("op-note", polled = "Nothing shared yet: ask for a person in the chat and say yes.");
   else if ($("op-note").textContent === polled) note("op-note", polled = "");  // no longer true; "Sent." stays
 }
-
-$("op-login").addEventListener("submit", (e) => {
-  e.preventDefault();
-  operatorToken = $("op-token").value.trim();
-  $("op-token").value = "";
-  cards.clear();
-  $("handoffs").replaceChildren();
-  note("op-note", "");
-  refreshOperator();
-});
 
 // ---- start ----
 async function start() {
@@ -944,7 +921,7 @@ async function start() {
   scenarios();
   session = stored();
   let intro;
-  if (session) {  // the server's intro, not the saved one: it offers a person only while OPERATOR_TOKEN is set
+  if (session) {  // the server's intro, not the saved one: it offers a person on the demo
     try { intro = (await (await api("/demo/api/state")).json()).intro; } catch (e) { return; }  // a 401 showed "session ended"
   } else {
     const r = await fetch("/demo/api/session", {method: "POST"});
