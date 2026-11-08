@@ -10,9 +10,10 @@ import pytest
 from fastapi.testclient import TestClient
 from starlette.requests import Request
 
-from app import chat, db, demo, llm, main, paypal, ratelimit, scam_check
+from app import chat, db, demo, dispute_draft, llm, main, paypal, ratelimit, scam_check
 from tests.conftest import BEARER
 from tests.test_chat import choice, held_reply  # noqa: F401  (choice is a fixture)
+from tests.test_dispute_draft import clock  # noqa: F401  (clock is an autouse fixture)
 from tests.test_scam_check import (  # noqa: F401  (claimed is an autouse fixture, llm_stub a fixture)
     PAID, SCAM_CHAT, TID, TWO_SIGNALS, capture, claimed, llm_stub,
 )
@@ -260,7 +261,8 @@ def test_d13_the_chat_runs_a_check_over_three_messages_in_its_own_session(api, d
     capture(api, httpx.Response(200, json=USD_PAID))
     h, other = start(), start("2.2.2.2")
     assert said(h, "check") == {"reply": chat.ASK_PRICE, "route": "start_check", "intent": None, "notes": [],
-                                      "awaiting": "price", "held": False}
+                                      "awaiting": "price", "held": False, "dispute_id": None,
+                                      "checklist": None}
     assert said(h, "45.00 USD")["awaiting"] == "chat"
     r = said(h, PAID)
     assert r["route"] == "check" and r["reply"].startswith("VERIFIED: ") and r["awaiting"] is None
@@ -598,7 +600,7 @@ def test_d33_the_persons_close_closes_only_the_card_they_clicked(demo_db, choice
 
 
 def test_d34_the_thread_keeps_only_its_latest_state_without_its_messages(demo_db, choice, monkeypatch):
-    """InMemorySaver kept every checkpoint until the session ended, a screenshot in each (RECHECK #39): each turn now
+    """InMemorySaver kept every checkpoint until the session ended, a screenshot in each: each turn now
     leaves one, with no messages, and a screenshot held for the price is kept as its copy, never as the image."""
     ran = []
     monkeypatch.setattr(scam_check, "run", lambda *args: ran.append(args) or FAKE)
@@ -673,8 +675,9 @@ def test_d36_a_refused_tracking_leaves_the_sale_unshipped_for_another_try(api, d
     r = ship(h)
     assert (r.status_code, r.json()["detail"]) == (502, "PayPal refused the tracking (422, CAPTURE_STATUS_NOT_VALID)")
     assert tracking() is None
-    with pytest.raises(httpx.ConnectTimeout):  # no answer: unmarked too
-        ship(h)
+    r = ship(h)  # no answer: a note for the tester, not a bare 500, and unmarked too
+    assert (r.status_code, r.json()["detail"]) == (502, "PayPal didn't answer the tracking (ConnectTimeout). Try again "
+                                                        "in a moment.")
     assert tracking() is None
     assert ship(h).json() == {"tracking": "VG-DEMO-ORDER1"} and track.call_count == 3
 
@@ -774,3 +777,72 @@ def test_d41_a_restart_during_a_handoff_still_relays_a_screenshot_unread(demo_db
     assert not ratelimit._hits[("1.1.1.1", "screenshot")]
     (row,) = demo_db[h["X-Demo-Session"]]["handoffs"]
     assert row["transcript"][-1] == {"who": "seller", "text": "[screenshot, not read]"}
+
+
+def test_d50_the_state_says_what_the_chat_waits_for_so_a_reloaded_page_knows(demo_db, choice):
+    h = start()
+    assert client.get("/demo/api/state", headers=h).json()["awaiting"] is None
+    said(h, "check")
+    assert client.get("/demo/api/state", headers=h).json()["awaiting"] == "price"
+    said(h, "25.00 USD")
+    assert client.get("/demo/api/state", headers=h).json()["awaiting"] == "chat"
+
+
+def test_d50_the_reply_names_the_dispute_id_it_got(api, demo_db, choice):
+    h = start()
+    real = "PP-R-ABC-12345678"
+    r = said(h, real.lower())
+    assert (r["dispute_id"], r["reply"], r["checklist"]) == (real, chat.REAL_DISPUTE, None) and not api.calls
+    choice.intent = "dispute"
+    assert said(h, "I got a dispute")["dispute_id"] is None
+    assert said(h, "Hello")["dispute_id"] is None
+
+
+def test_d51_the_practice_tab_lists_the_scenarios_without_calling_paypal(api, demo_db):
+    h = start()
+    called = len(api.calls)
+    practice = client.get("/demo/api/state", headers=h).json()["practice"]
+    assert len(api.calls) == called and [p["id"] for p in practice] == list(dispute_draft.SCENARIOS)
+    assert practice[0] == {"id": "PP-SIM-INR-01", "title": "Not received, but delivered",
+                           "story": dispute_draft.SCENARIOS["PP-SIM-INR-01"]["story"], "reason": "Item not received",
+                           "stage": "Inquiry stage"}
+    assert {p["id"]: p["stage"] for p in practice}["PP-SIM-CARD-09"] == "Card or bank case"
+
+
+def test_d51_a_practice_id_in_the_chat_returns_its_checklist(api, demo_db, choice):
+    h = start()
+    called = len(api.calls)
+    *steps, r = lines(say(h, "pp-sim-inr-03"))
+    # the draft's steps, for the Practice tab's rail, before the reply
+    assert [(x["type"], x["graph"], x["node"]) for x in steps] == [("node", "dispute_draft", n) for n in (
+        "load_scenario", "classify_case", "build_checklist", "build_draft", "write_reply")]
+    assert steps[1]["update"] == {"kind": "inr"}
+    assert (r.pop("type"), r["route"], r["intent"], r["dispute_id"]) == ("reply", "dispute", None, "PP-SIM-INR-03")
+    assert r["checklist"] == dispute_draft.run("PP-SIM-INR-03")["checklist"]
+    assert [g["group"] for g in r["checklist"]] == ["ready", "missing", "check"]
+    assert r["reply"].startswith(dispute_draft.SIMULATED) and len(api.calls) == called
+    assert said(h, "Hello")["checklist"] is None
+    choice.intent = "dispute"
+    assert said(h, "I got a dispute")["checklist"] is None
+
+
+def test_d51_a_practice_dispute_that_fails_still_answers(api, demo_db, choice, monkeypatch):  # review, 2026-11-07
+    """dispute_draft raising: the chat says so, and the panel's run never takes the reply down or draws a checklist."""
+    h = start()
+
+    def broken(*a, **k):
+        raise RuntimeError("scenario file")
+    monkeypatch.setattr(dispute_draft, "run", broken)
+    *steps, r = lines(say(h, "PP-SIM-INR-03"))
+    assert not steps and r["type"] == "reply" and r["checklist"] is None
+    assert r["reply"].startswith(chat.PRACTICE_FAILED.format("PP-SIM-INR-03"))
+    real = dispute_draft.graph.invoke  # the chat's run works, the panel's (the one with a report) fails
+
+    def panel_fails(did, report=None):
+        if report:
+            raise RuntimeError("panel")
+        out = real({"dispute_id": did})
+        return {"reply": out["reply"], "shown": out["shown"], "kind": out.get("kind"), "checklist": []}
+    monkeypatch.setattr(dispute_draft, "run", panel_fails)
+    *steps, r = lines(say(h, "PP-SIM-INR-03"))
+    assert not steps and r["checklist"] is None and r["reply"].startswith(dispute_draft.SIMULATED)

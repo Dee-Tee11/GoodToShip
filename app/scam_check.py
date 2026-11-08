@@ -146,6 +146,7 @@ PAYMENT_TEMPLATE = {  # the sentence about E1, per payment status: always code's
     "NO_ID": "The chat has no PayPal transaction ID to check.",
 }
 
+AMOUNT, CURRENCY = re.compile(r"[0-9]{1,10}(?:\.[0-9]{1,2})?"), re.compile(r"[A-Z]{3}")  # money's, fullmatch only
 # 17 chars with at least one digit: skips 17-letter words and both halves of WH-...-... webhook ids
 TXN_ID = re.compile(r"(?<![0-9A-Za-z-])(?=[0-9A-Z]{0,16}[0-9])[0-9A-Z]{17}(?![0-9A-Za-z-])")
 # the buyer's words are what's left without the seller's lines and the Buyer: labels (a screenshot's copy has both)
@@ -281,6 +282,15 @@ def verdict_for(payment: dict, signals: list[dict] | None) -> tuple[str, str]:
     if payment["status"] == "NOT_FOUND" and len(confirmed) >= 2:
         return "SCAM_LIKELY", "P.SCAM_LIKELY"
     return "WAIT", "P.WAIT_NOT_CONFIRMED"
+
+
+def money(amount, currency) -> str | None:
+    """"40.00 USD", or None unless both are well formed: PayPal's amount is outside data. [0-9], not \\d: no other
+    digits. The chat's (last_case, the card) and dispute_draft's."""
+    if (isinstance(amount, str) and isinstance(currency, str) and AMOUNT.fullmatch(amount)
+            and CURRENCY.fullmatch(currency)):
+        return f"{Decimal(amount):.2f} {currency}"
+    return None
 
 
 class Unreadable(Exception):

@@ -2,6 +2,7 @@
 import base64
 import importlib
 import json
+import re
 from datetime import date
 from types import SimpleNamespace
 
@@ -10,7 +11,8 @@ import pytest
 from langgraph.checkpoint.memory import InMemorySaver
 from pydantic import ValidationError
 
-from app import chat, llm, output_guardrails, policy_pack, scam_check
+from app import chat, dispute_draft, llm, output_guardrails, policy_pack, scam_check
+from tests.test_dispute_draft import clock  # noqa: F401  (clock is an autouse fixture)
 from tests.test_scam_check import (  # noqa: F401  (claimed is an autouse fixture, llm_stub a fixture)
     COMPLETED, GROQ, PAID, PNG, SCAM_CHAT, TID, TID2, TWO_SIGNALS, capture, claimed, completion, llm_stub, search,
 )
@@ -354,7 +356,8 @@ def test_c13_owners():
     assert {n for n, fn in nodes.items() if fn.owns & {"awaiting", "price"}} == {"start_check", "check", "question",
                                                                                  "advise", "dispute", "handoff"}
     assert {n for n, fn in nodes.items() if "last_case" in fn.owns} == {"start_check", "check"}
-    assert {n for n, fn in nodes.items() if "last_question" in fn.owns} == {"classify", "start_check", "check"}
+    # dispute: reading a dispute ID clears it, as start_check does (2026-11-06)
+    assert {n for n, fn in nodes.items() if "last_question" in fn.owns} == {"classify", "start_check", "check", "dispute"}
     assert nodes["handoff"].owns == {"messages", "awaiting", "price", "shown", "consented", "held"}
     # what is held goes wherever the price goes: no node ends a check and leaves the buyer's screenshot text behind
     assert {n for n, fn in nodes.items() if "held" in fn.owns} == {n for n, fn in nodes.items() if "price" in fn.owns}
@@ -1012,6 +1015,7 @@ def test_c31_after_a_dispute_note_how_to_respond_and_by_when(choice, talk):
     talk("The buyer opened a dispute")
     choice.intent, choice.entries = "next_steps", []
     reply = talk("What should I do now?")
+    # the last reply made the offer: PayPal's line only (RECHECK #48, 2026-11-08)
     assert reply == "\n\n".join([*chat._notes(chat.RESPOND_KEYS), scam_check.SUPPORT])
     assert all(f"Source: {chat.VERIFIED[k]['source_url']}" in reply for k in chat.RESPOND_KEYS)
 
@@ -1246,6 +1250,18 @@ def test_c39_a_failed_answer_step_shows_the_note_again(choice, talk, sentences):
     assert talk.state["shown"] == ["vg_signal_off_platform"] and len(choice.answers) == 1
 
 
+def test_c39_a_lists_heading_is_never_quoted_without_its_items(choice, talk):  # E08 case 10, 2026-11-07
+    listed = [s for _, s in chat._listed(["pp_respond_to_dispute"])]
+    n, heading = next((n, s) for n, s in enumerate(listed, 1) if s.startswith("Documents or info"))
+    assert heading.count("\n- ") == 4 and not any(s.startswith("- ") for s in listed)
+    assert chat._sentences("Steps:\n- one\n- two\nDone. Then:\n- three") == [
+        "Steps:\n- one\n- two", "Done.", "Then:\n- three"]
+    choice.intent, choice.entries = "question", ["pp_respond_to_dispute"]
+    talk("How do I respond to a dispute?")
+    choice.answer, choice.sentences = [], [n]  # the answer step fails: the picked sentence is quoted, items and all
+    assert f"{heading}\n" in talk("What evidence should I send?")
+
+
 def test_c39_on_the_demo_a_failed_answer_step_offers_a_person(choice, demo_talk):  # E08 cases 9, 15
     assert closers(ff_follow_up(choice, demo_talk, GOOD)) == []  # an answer that passed: no new closing line
     choice.answer, choice.sentences = [], [1, 2]
@@ -1377,6 +1393,7 @@ def test_c44_the_card_says_the_chat_wasnt_read_only_where_the_chat_could_change_
     found = {"E1": {"status": "FOUND", "expected_amount": "25.00", "expected_currency": "USD"}}
     for out in (unread, unread | {"policy_id": "P.VERIFIED_WARN", "evidence": found}):
         assert chat.PAYMENT_ONLY in chat.card(out, only_ids=True) and chat.NOT_READ in chat.card(out)
+        assert chat.NOT_READ.startswith("I couldn't check the buyer's chat")  # never the dispute text (review, 2026-11-07)
     for pid in ("P.WAIT_SHIPPED", "P.WAIT_REUSED", "P.WAIT_WRONG_AMOUNT", "P.WAIT_NOT_CONFIRMED"):
         for status in ("FOUND", "UNAVAILABLE", "NO_ID"):
             out = unread | {"policy_id": pid, "evidence": {"E1": found["E1"] | {"status": status}}}
@@ -1478,3 +1495,242 @@ def test_u26_before_you_ship_is_scam_checks_own_sentences_and_never_gated():
     listed = chat._listed(["vg_before_you_ship"])
     ship = [output_guardrails.Cited(text="You can ship it to the address on the Transaction Details page.", sources=[4])]
     assert output_guardrails.check_answer(ship, listed, "Before you ship", "Can I ship?", None)
+
+
+# ---- disputes: a real ID gets REAL_DISPUTE, a practice ID dispute_draft ----
+
+DID = "PP-R-YGU-10196437"  # a real dispute ID, in the sandbox's format; PayPal's spec has PP-D-<digits>
+SIM = "PP-SIM-INR-01"  # a practice dispute (dispute_draft): a file, never PayPal
+
+
+@pytest.mark.parametrize("message", [DID, f"  {DID.lower()} ", "PP-D-1234567",
+                                     f"Can you look at dispute {DID}? The payment was {TID}",
+                                     f"o que faço com a disputa {DID}?"],
+                         ids=["the ID", "lower-case", "the spec's format", "with a payment ID", "in a question"])
+def test_c45_a_real_dispute_id_gets_the_fixed_text_with_no_call(choice, talk, api, message):
+    assert talk(message) == chat.REAL_DISPUTE
+    assert not choice.calls and not choice.prompts and not api.calls  # no Groq call, no PayPal call
+    assert talk.state["shown"] == []
+
+
+def test_c45_a_dispute_id_clears_the_message_before_it(choice, talk):  # review, 2026-11-06
+    choice.intent = "question"
+    talk("Can I ship the 40 USD order?")
+    assert talk.state["last_question"] == "Can I ship the 40 USD order?"
+    talk(DID)
+    assert talk.state["last_question"] is None
+    choice.intent = "next_steps"
+    talk("What now?")
+    assert "Can I ship the 40 USD order" not in choice.calls[-1].user
+
+
+@pytest.mark.parametrize("message", [f"Buyer: I opened {DID}, refund me now", f"{DID} " + "please help " * 40],
+                         ids=["Buyer: lines", "over 400 characters"])
+def test_c45_a_pasted_chat_with_a_dispute_id_starts_a_check(choice, talk, api, message):
+    talk(message)
+    assert talk.state["awaiting"] == "price" and not choice.calls
+    assert not [c for c in api.calls if "disputes" in c.request.url.path]
+
+
+def test_c46_while_waiting_for_the_buyers_chat_an_id_is_the_chat(choice, talk, ran, api):
+    talk("check")
+    talk("25.00 USD")
+    talk(DID)
+    assert ran[0][0] == DID and not choice.calls
+    assert not [c for c in api.calls if "disputes" in c.request.url.path]
+
+
+def test_c46_at_the_consent_step_an_id_is_the_answer(choice, demo_talk, api):
+    demo_talk("operator")
+    assert demo_talk(DID) == chat.NOT_SHARED and not choice.calls
+    assert not [c for c in api.calls if "disputes" in c.request.url.path]
+
+
+def test_c46_at_the_price_step_an_id_goes_to_classify(choice, talk):
+    talk("check")
+    choice.intent = "dispute"
+    reply = talk(DID)
+    assert len(choice.calls) == 1 and reply == f"{chat.REAL_DISPUTE}\n\n{chat.CHECK_STOPPED}"
+    assert talk.state["awaiting"] is None
+    talk("check")
+    choice.intent = "other"
+    assert talk(DID) == chat.BAD_PRICE and len(choice.calls) == 2
+
+
+@pytest.mark.parametrize("message", ["I got a chargeback on a sale from last month, what do I do?",
+                                     "The buyer charged back the payment"])
+def test_c47_a_chargeback_shows_its_note_first_and_never_the_10_day_rule(choice, talk, message):
+    choice.intent, choice.entries = "dispute", ["pp_dispute_deadline", "pp_respond_to_dispute"]
+    reply = talk(message)
+    assert reply == "\n\n".join([chat._note("pp_chargeback"), chat._note("pp_respond_to_dispute"), scam_check.SUPPORT])
+    assert talk.state["shown"] == ["pp_chargeback", "pp_respond_to_dispute"]
+    deadline = chat.VERIFIED["pp_dispute_deadline"]["text"]
+    choice.intent, choice.entries = "dispute", ["pp_dispute_deadline"]
+    assert deadline not in talk("And how long do I have?")  # the message before says chargeback
+    assert talk.state["shown"] == ["pp_chargeback"]
+    choice.intent, choice.entries = "next_steps", []
+    assert deadline not in talk("What now?")  # the last reply's chargeback note
+    choice.intent, choice.entries = "dispute", ["pp_chargeback", "pp_dispute_deadline"]
+    assert deadline not in talk("So how long?")  # the LLM's pick, two messages on
+
+
+def test_c47_a_follow_up_after_the_chargeback_note_keeps_it(choice, talk):  # E08 31, the user 2026-11-08
+    choice.intent, choice.entries = "dispute", ["pp_chargeback"]
+    talk("I got a chargeback notice from the card issuer.")
+    choice.intent, choice.entries = "next_steps", []
+    talk("What now?")
+    choice.intent, choice.entries = "question", ["pp_dispute_deadline"]  # no chargeback word in this or the one before
+    reply = talk("And how long do I have to respond?")
+    assert talk.state["shown"] == ["pp_chargeback"] and chat.VERIFIED["pp_dispute_deadline"]["text"] not in reply
+
+
+def test_c47_a_paypal_dispute_after_a_chargeback_gets_its_deadline(choice, talk):  # review, 2026-11-07
+    """The chargeback note stays for its own conversation, not every dispute message after it (it went by `shown`)."""
+    talk("PP-SIM-CARD-09")
+    choice.intent, choice.entries = "dispute", ["pp_dispute_deadline"]
+    reply = talk("Another buyer opened a PayPal dispute, how long do I have to respond?")
+    assert reply.startswith(chat.DISPUTE_TEXT) and chat.VERIFIED["pp_dispute_deadline"]["text"] in reply
+
+
+def test_c47_a_chargeback_question_never_gets_the_10_day_rule(choice, talk):
+    """One gate in classify, for every node: question too, and the chargeback note takes the deadline's place."""
+    choice.intent, choice.entries = "question", ["pp_dispute_deadline"]
+    reply = talk("I got a chargeback, how long do I have?")
+    assert talk.state["shown"] == ["pp_chargeback"] and chat.VERIFIED["pp_dispute_deadline"]["text"] not in reply
+
+
+def test_c47_the_llms_chargeback_pick_counts_without_a_chargeback_word(choice, talk):  # review, 2026-11-06
+    choice.intent, choice.entries = "dispute", ["pp_chargeback", "pp_dispute_deadline"]
+    reply = talk("The buyer's bank reversed the payment, what do I do?")
+    assert reply == "\n\n".join([chat._note("pp_chargeback"), scam_check.SUPPORT])  # a card case: no practice offer
+    assert talk.state["shown"] == ["pp_chargeback"]
+
+
+def test_c47_a_paypal_dispute_keeps_the_deadline_note(choice, talk):
+    choice.intent = "dispute"
+    reply = talk("A buyer opened a dispute, what now?")
+    assert chat.VERIFIED["pp_dispute_deadline"]["text"] in reply and talk.state["shown"][1] == "pp_dispute_deadline"
+    assert chat.VERIFIED["pp_chargeback"]["text"] not in reply
+
+
+def test_c48_without_an_id_how_disputes_work_and_the_ask_for_it(choice, talk):
+    choice.intent = "dispute"
+    assert talk("I got a dispute") == "\n\n".join([chat.DISPUTE_TEXT, *chat._notes(chat.DISPUTE_KEYS[:2]),
+                                                    scam_check.SUPPORT])
+    assert chat.DISPUTE_TEXT.endswith(chat.ASK_ID) and "approve" not in chat.DISPUTE_TEXT + chat.INTRO
+    assert "Practising a dispute response" in chat.INTRO and "Resolution Center" in chat.INTRO
+
+
+def test_c49_a_practice_dispute_stays_out_of_the_chats_thread_and_stream(choice):
+    talk = Talk({"live": chat.LIVE})
+    out = list(talk.graph.stream({"messages": [{"role": "user", "content": SIM}]}, talk.config,
+                                 context={"live": chat.LIVE}, stream_mode=["custom", "updates", "values"]))
+    assert not [chunk for mode, chunk in out if mode == "custom"]  # no live steps
+    assert [list(chunk) for mode, chunk in out if mode == "updates"] == [["dispute"]]
+    saved = list(talk.saver.list(None))
+    assert {c.config["configurable"]["checkpoint_ns"] for c in saved} == {""}
+    for c in saved:  # shown is the chat's own too: the notes in its last reply
+        assert not set(c.checkpoint["channel_values"]) & (set(dispute_draft.State.__annotations__) - {"shown"})
+
+
+@pytest.mark.parametrize("message", [SIM, f"  {SIM.lower()} ", f"Can you help me answer {SIM}?"],
+                         ids=["the ID", "lower-case", "in a question"])
+def test_c50_a_practice_id_goes_to_dispute_draft_without_the_llm_or_paypal(choice, talk, api, message):
+    assert talk(message) == dispute_draft.run(SIM)["reply"]
+    assert not choice.calls and not choice.prompts and not api.calls
+    assert talk.state["shown"] == ["pp_respond_to_dispute"] and talk.state["last_question"] is None
+
+
+def test_c50_a_pasted_chat_with_a_practice_id_starts_a_check(choice, talk):
+    talk(f"Buyer: I opened {SIM}, refund me now")
+    assert talk.state["awaiting"] == "price" and not choice.calls
+
+
+def test_c50_at_the_price_step_a_practice_id_goes_to_classify_and_ends_the_check(choice, talk):
+    talk("check")
+    choice.intent = "dispute"
+    reply = talk(SIM)
+    assert choice.calls and reply.startswith(dispute_draft.SIMULATED) and reply.endswith(f"\n\n{chat.CHECK_STOPPED}")
+    assert dispute_draft.ANYTHING_ELSE not in reply and talk.state["awaiting"] is None  # one closing line
+
+
+def test_c50_the_offer_names_practice_ids_that_exist():
+    assert chat.DISPUTE_TEXT.endswith(chat.ASK_ID)
+    for text in (chat.ASK_ID, chat.REAL_DISPUTE):
+        ids = re.findall(r"PP-SIM-[A-Z]+-[0-9]+", text)
+        assert ids and all(i in dispute_draft.SCENARIOS for i in ids), text
+
+
+def test_c50_a_question_about_a_dispute_ends_with_the_offer_to_draft(choice, talk):
+    choice.intent, choice.entries = "question", ["pp_seller_protection", "pp_snad_not_covered"]
+    assert talk("The buyer opened a case saying the item isn't as described. Am I protected?") == "\n\n".join(
+        [*chat._notes(["pp_seller_protection", "pp_snad_not_covered"]), chat.DRAFT_OR_PAYPAL])  # E08 11: before, none
+
+
+def test_c50_a_shipping_proof_question_keeps_its_closing(choice, talk):
+    choice.intent, choice.entries = "question", ["pp_proof_of_delivery"]
+    assert chat.ASK_ID not in talk("What proof of shipping does PayPal accept?")
+
+
+def test_c50_on_the_demo_the_offer_to_draft_and_paypals_line_close_it_once(choice, demo_talk):
+    choice.intent, choice.entries = "question", ["pp_dispute_deadline"]
+    reply = demo_talk("How long do I have to answer a dispute?")
+    assert reply.endswith(f"\n\n{chat.DRAFT_OR_PAYPAL}") and chat.OFFER_OPERATOR not in reply
+    choice.sentences = [1]  # a follow-up answered by the note just shown: the answer step fails, the note is quoted
+    reply = demo_talk("And if I don't answer in time?")  # the offer was in the last reply: a failed step's closing only
+    assert reply.endswith(f"\n\n{chat.OFFER_OPERATOR}") and chat.ASK_ID not in reply
+
+
+def test_c50_the_offer_shows_once_in_a_stretch_of_dispute_replies(choice, talk):  # RECHECK #48, 2026-11-08
+    choice.intent, choice.entries = "dispute", ["pp_dispute_vs_claim"]
+    assert chat.ASK_ID in talk("A buyer opened a dispute") and chat.ASK_ID in chat.DISPUTE_TEXT
+    choice.entries = ["pp_dispute_deadline"]
+    reply = talk("And how long do I have?")
+    assert reply == chat._note("pp_dispute_deadline") and talk.state["shown"] == ["pp_dispute_deadline"]
+    choice.intent, choice.entries = "question", ["pp_respond_to_dispute"]
+    assert chat.ASK_ID not in talk("What do I send?")
+    choice.intent, choice.entries = "other", []
+    talk("Thanks")  # a reply with no dispute note ends the stretch
+    choice.intent, choice.entries = "question", ["pp_respond_to_dispute"]
+    assert talk("Another buyer opened one, what do I send?").endswith(f"\n\n{chat.DRAFT_OR_PAYPAL}")
+
+
+def test_c47_estorno_is_no_chargeback():  # Portuguese for any refund (the user, 2026-11-08)
+    assert not chat.CHARGEBACK.search("O comprador pediu um estorno e abriu uma disputa")
+
+
+def test_c50_at_the_price_step_a_dispute_question_ends_the_check_only(choice, talk):
+    talk("check")
+    choice.intent, choice.entries = "question", ["pp_dispute_deadline"]
+    reply = talk("How long do I have to answer a dispute?")
+    assert reply.endswith(f"\n\n{chat.CHECK_STOPPED}") and chat.ASK_ID not in reply
+
+
+def test_c50_what_now_after_a_practice_dispute_is_how_to_respond(choice, talk):
+    talk(SIM)
+    choice.intent = "next_steps"
+    # not "Before you ship", and no offer to practise again right after a practice dispute
+    assert talk("What now?") == "\n\n".join([*chat._notes(chat.RESPOND_KEYS), scam_check.SUPPORT])
+    assert talk("What now?") == "\n\n".join([chat.SAME_STEPS, scam_check.SUPPORT])
+
+
+def test_c50_what_now_after_a_shipping_proof_note_offers_no_practice(choice, talk):  # review, 2026-11-07
+    choice.intent, choice.entries = "question", ["pp_proof_of_delivery"]
+    talk("What proof of shipping does PayPal accept?")
+    choice.intent, choice.entries = "next_steps", []
+    reply = talk("What now?")
+    assert chat.ASK_ID not in reply and chat.VERIFIED["pp_respond_to_dispute"]["text"] not in reply
+
+
+@pytest.mark.parametrize("first, respond", [
+    ("I have an Item Not Received dispute. What proof of delivery does PayPal accept?", True),  # E08 33
+    ("The buyer filed a claim. What proof of shipping does PayPal accept?", True),
+    ("The buyer filed a chargeback dispute. What proof does the card issuer accept?", False),  # never the 10-day rule
+])
+def test_c50_what_now_after_a_message_about_a_dispute_is_how_to_respond(choice, talk, first, respond):  # RECHECK #50
+    choice.intent, choice.entries = "question", ["pp_proof_of_delivery"]
+    talk(first)
+    choice.intent, choice.entries = "next_steps", ["vg_before_you_ship"]  # the LLM's pick isn't read
+    reply = talk("What now?")
+    assert (chat.VERIFIED["pp_respond_to_dispute"]["text"] in reply) is respond
+    assert ("10 days" in reply) is respond and chat.ASK_ID not in reply

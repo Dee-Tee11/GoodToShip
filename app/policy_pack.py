@@ -214,15 +214,19 @@ POLICY_PACK = {
         "closed automatically after 20 days unless you or the buyer escalate it.",
         PAYPAL_PAGES + "cshelp/article/i-am-a-seller---how-do-i-handle-a-dispute-or-problem-with-a-buyer-help1083",
     ),
-    # added 2026-10-30, verified by the user the same day. Joined list items take "; " and a final "." (Vendor Guard's
+    # added 2026-10-30, verified by the user the same day. The list is shown as "- " bullets, one per line (Vendor Guard's
     # punctuation, not PayPal's words)
     "pp_respond_to_dispute": _pp(
         "How to respond to a dispute, and what to send",
         "Go to your Resolution Center. You’ll find a list of disputes you’ve received here. Select the dispute needing "
-        "your response. Documents or info that you need to submit: a third-party shipping receipt; tracking number - or "
-        "a signature confirmation; proof of refund; other evidence to show the buyer has received the item, or "
-        "downloaded your products (in the case of digital goods). Submit your responses and supporting evidence "
-        "promptly, as this information is time sensitive.",
+        "your response.\n"
+        "Documents or info that you need to submit:\n"
+        "- a third-party shipping receipt\n"
+        "- tracking number - or a signature confirmation\n"
+        "- proof of refund\n"
+        "- other evidence to show the buyer has received the item, or downloaded your products (in the case of digital "
+        "goods)\n"
+        "Submit your responses and supporting evidence promptly, as this information is time sensitive.",
         PAYPAL_PAGES + "cshelp/article/i-am-a-seller---how-do-i-handle-a-dispute-or-problem-with-a-buyer-help1083",
         "2026-10-30",
     ),
@@ -253,6 +257,21 @@ POLICY_PACK = {
         PAYPAL_PAGES + "cshelp/article/how-do-i-issue-a-refund-help101",
     ),
 }
+
+
+def body(entry: dict) -> str:
+    """A note's text without its "Still unsure? … Contact PayPal" line: a reply chooses its own closing."""
+    return entry["text"].removesuffix(f"\n{SUPPORT}")
+
+
+def source(entry: dict) -> str:
+    return f"\nSource: {entry['source_url']}" if entry["source_url"].startswith("https://") else ""  # not README.md#…
+
+
+def note(entry: dict, text: str | None = None) -> str:
+    """A verified entry word for word, as the chat and dispute_draft show it: title, text (or only some of its
+    sentences) and, for PayPal's, the source."""
+    return f"{entry['title']}\n{text or body(entry)}{source(entry)}"
 
 
 def verified() -> dict[str, dict]:

@@ -6,7 +6,7 @@ the person closes it. Closing deletes what the person saw and starts the chat ov
 
 On only with DEMO_MODE=true, and only against PayPal's sandbox (main.lifespan refuses to start otherwise). Creating and
 capturing orders, and adding test tracking to a paid one, are the app's only PayPal writes. They play the buyer's
-purchase and the seller's shipment, and stay out of the graphs.
+purchase and the seller's shipment, and stay out of the graphs. Practice disputes are fictional, from a file: no PayPal.
 The session is anonymous: the page keeps its id in sessionStorage, and everything goes when it ends.
 """
 import logging
@@ -26,7 +26,7 @@ from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph.message import REMOVE_ALL_MESSAGES
 from pydantic import BaseModel, Field
 
-from app import chat, db, paypal, ratelimit, scam_check
+from app import chat, db, dispute_draft, paypal, ratelimit, scam_check
 
 log = logging.getLogger(__name__)
 ENABLED = os.getenv("DEMO_MODE", "").strip().lower() == "true"
@@ -38,12 +38,12 @@ MAX_REPLY = 2000
 PAGE = Path(__file__).parent / "static" / "demo.html"
 # the chat graph with one thread per demo session (thread_id = session id), forgotten when the session ends. Each turn
 # leaves only its latest state, without its messages (_keep_latest).
-# ponytail: in memory, so a restart or Render's sleep forgets every conversation; PostgresSaver with dispute_defense
+# ponytail: in memory, so a restart or Render's sleep forgets every conversation; PostgresSaver if they must survive one
 chat_graph = chat._build(InMemorySaver())
 # each session's conversation, for a handoff, kept only with OPERATOR_TOKEN: what the seller sent (a screenshot only
 # when it was read) and every reply. Outside the graph, so InMemorySaver doesn't copy it into every checkpoint.
-# ponytail: no cap; 30 messages and 3 read screenshots an hour per IP bound how fast it grows, not for how long:
-# an open tab keeps its session alive (RECHECK #39)
+# ponytail: no cap; 30 messages and 3 read screenshots an hour per IP bound how fast it grows, and db.DEMO_MAX for
+# how long (a session ends 2 hours after it started, even with its tab open)
 _transcripts: dict[str, list[dict]] = {}
 _busy: set[str] = set()  # sessions inside busy(): a chat message or "End demo"
 _busy_lock = threading.Lock()  # turn() runs in the threadpool
@@ -55,7 +55,7 @@ def enabled():
 
 
 def session(x_demo_session: str = Header("", max_length=64)) -> str:
-    """The caller's demo session, kept alive by this request. 401 once it ended or went idle."""
+    """The caller's demo session, kept alive by this request. 401 once it ended, went idle or reached db.DEMO_MAX."""
     if not x_demo_session or not db.touch_demo_session(x_demo_session):
         raise HTTPException(401, "this demo session has ended, reload the page to start a new one")
     return x_demo_session
@@ -129,14 +129,26 @@ def _paypal_error(r, what: str) -> HTTPException:
     return HTTPException(502, f"PayPal refused the {what} ({r.status_code}{', ' + issue if issue else ''})")
 
 
+def _no_answer(e: Exception, what: str) -> HTTPException:
+    """502 for a PayPal call that failed without an answer to show (a timeout, a refused connection, an odd body), as
+    the tester's note, not a bare 500. A write may still have happened: a capture sent again is the same capture (its
+    PayPal-Request-Id), an order sent again is a second unpaid order, and tracking sent again can be a second tracker
+    (RISKS.md, accepted for the sandbox)."""
+    log.warning("PayPal %s failed: %s", what, type(e).__name__)
+    return HTTPException(502, f"PayPal didn't answer the {what} ({type(e).__name__}). Try again in a moment.")
+
+
 @router.post("/demo/api/orders")
 def create_order(body: SaleIn, request: Request, session_id: str = Depends(session)):
     ratelimit.hit(request, "sale")
     item, amount = scam_check.sanitize(body.item) or "Item", f"{body.amount:.2f}"
-    r = paypal._call("POST", "/v2/checkout/orders", headers={"PayPal-Request-Id": str(uuid.uuid4())}, json={
-        "intent": "CAPTURE",
-        "purchase_units": [{"description": item, "amount": {"currency_code": CURRENCY, "value": amount}}],
-    })
+    try:
+        r = paypal._call("POST", "/v2/checkout/orders", headers={"PayPal-Request-Id": str(uuid.uuid4())}, json={
+            "intent": "CAPTURE",
+            "purchase_units": [{"description": item, "amount": {"currency_code": CURRENCY, "value": amount}}],
+        })
+    except Exception as e:
+        raise _no_answer(e, "order") from e
     if r.is_error:
         raise _paypal_error(r, "order")
     order_id = r.json()["id"]
@@ -149,8 +161,11 @@ def capture_order(order_id: str, session_id: str = Depends(session)):
     if not db.demo_sale_exists(session_id, order_id):  # the id comes from the browser: only this session's sales
         raise HTTPException(404, "no such sale in this demo session")
     # a fixed request id: if the browser retries, PayPal returns the first capture instead of capturing again
-    r = paypal._call("POST", f"/v2/checkout/orders/{order_id}/capture",
-                     headers={"PayPal-Request-Id": f"capture-{order_id}"}, json={})
+    try:
+        r = paypal._call("POST", f"/v2/checkout/orders/{order_id}/capture",
+                         headers={"PayPal-Request-Id": f"capture-{order_id}"}, json={})
+    except Exception as e:
+        raise _no_answer(e, "capture") from e
     if r.is_error:
         raise _paypal_error(r, "capture")
     try:
@@ -182,12 +197,14 @@ def ship_order(order_id: str, request: Request, session_id: str = Depends(sessio
                                "carrier_name_other": "Vendor Guard demo", "notify_payer": False})
         if r.is_error:
             raise _paypal_error(r, "tracking")
-    except Exception:  # refused, or no answer (which may still have added it): unmarked, so a click can try again
+    except Exception as e:  # refused, or no answer (which may still have added it): unmarked, so a click can try again
         try:
             db.release_demo_tracking(order_id, tracking)
-        except Exception as e:  # PayPal's error is the one the tester needs; the sale stays marked
-            log.error("release_demo_tracking failed: %s", type(e).__name__)
-        raise
+        except Exception as e2:  # PayPal's error is the one the tester needs; the sale stays marked
+            log.error("release_demo_tracking failed: %s", type(e2).__name__)
+        if isinstance(e, HTTPException):
+            raise
+        raise _no_answer(e, "tracking") from e
     return {"tracking": tracking}
 
 
@@ -199,7 +216,11 @@ def state(session_id: str = Depends(session)):
     for h in out["handoffs"]:  # the page shows it once, where the chat started over
         if h["status"] == "closed":
             h["notice"] = f"{chat.CLOSED}\n\n{intro}"
-    return {**out, "operators": bool(OPERATOR_TOKEN), "intro": intro}
+    # what the chat waits for, so a reloaded page never sends a dispute ID as the buyer's chat (it reads memory only)
+    awaiting = chat_graph.get_state(_thread(session_id)).values.get("awaiting")
+    # practice: the Practice disputes tab's fictional scenarios, from a file, any session's
+    return {**out, "operators": bool(OPERATOR_TOKEN), "intro": intro, "practice": dispute_draft.cards(),
+            "awaiting": awaiting}
 
 
 @router.post("/demo/api/end")
@@ -276,7 +297,7 @@ def _thread(session_id: str) -> dict:
 
 def _keep_latest(session_id: str) -> None:
     """The thread's latest checkpoint only, without its messages. InMemorySaver keeps every checkpoint, a screenshot in
-    each, until delete_thread (RECHECK #39), and nothing reads a thread's history, nor a turn's messages once it ended.
+    each, until delete_thread, and nothing reads a thread's history, nor a turn's messages once it ended.
     The saver's public API only. Inside the turn's busy()."""
     saver = chat_graph.checkpointer
     latest = saver.get_tuple(_thread(session_id))
@@ -365,5 +386,22 @@ def chat_turn(session_id: str, message: str, image: bytes | None, checks: list[s
         _transcripts.setdefault(session_id, []).extend(pair)  # after the row: a refused one leaves no "Sent" behind
     classified = nodes.get("classify") or {}
     # held: screenshots or payment IDs wait for the price, so the page's scenario chips don't send one (demo.html)
+    # dispute_id: the ID the dispute node read, so the live panel tells a read from an explanation. checklist: a
+    # practice dispute's, grouped, for the Practice tab's boxes: dispute_draft's own words, run again (a file, no PayPal),
+    # its steps streamed for the live panel. Only when the chat's own run answered (its reply starts with SIMULATED,
+    # not PRACTICE_FAILED), and a failure here costs the panel only, never the reply. ponytail: this run's steps, not
+    # the chat's; the same file, so the same result. Stream the chat's own run (chat.LIVE in _read_dispute) if they
+    # ever differ
+    did = chat.dispute_id(message) if route == "dispute" else None
+    steps, practice = [], None
+    if did and dispute_draft.SIM_ID.fullmatch(did) and dispute_draft.SIMULATED in reply:
+        try:
+            practice = dispute_draft.run(did, steps.append)
+        except Exception as e:
+            log.warning("dispute_draft failed for the panel: %s", type(e).__name__)
+            steps = []
+    yield from steps
     yield {"type": "reply", "reply": reply, "route": route, "intent": classified.get("intent"),
-           "notes": classified.get("entries", []), "awaiting": state.get("awaiting"), "held": bool(state.get("held"))}
+           "notes": classified.get("entries", []), "awaiting": state.get("awaiting"), "held": bool(state.get("held")),
+           "dispute_id": did,
+           "checklist": practice and practice["checklist"]}

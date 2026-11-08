@@ -1,6 +1,6 @@
 {
   "dependencies": ["."],
   "graphs": {"scam_check": "./app/scam_check.py:graph", "payment_check": "./app/scam_check.py:payment_graph",
-             "chat": "./app/chat.py:graph"},
+             "chat": "./app/chat.py:graph", "dispute_draft": "./app/dispute_draft.py:graph"},
   "env": ".env"
 }

@@ -69,14 +69,17 @@ def test_ending_a_session_deletes_all_it_left_and_nothing_else():
     db.end_demo_sessions(other[0])
 
 
-def test_only_idle_sessions_are_swept():
-    idle, active = demo_session(), demo_session()
+def test_only_idle_or_expired_sessions_are_swept():
+    idle, expired, active = demo_session(), demo_session(), demo_session()
     with db._connect() as c:
         c.execute("UPDATE demo_sessions SET last_seen = now() - interval '31 minutes' WHERE id = %s", (idle[0],))
+        # its tab still polls, but it started more than DEMO_MAX ago
+        c.execute("UPDATE demo_sessions SET created_at = now() - interval '121 minutes' WHERE id = %s", (expired[0],))
     assert not db.touch_demo_session(idle[0])  # idle sessions can't be revived
+    assert not db.touch_demo_session(expired[0])
     swept = db.end_demo_sessions()
-    assert idle[0] in swept and active[0] not in swept
-    assert rows(*idle[1:]) == NONE
+    assert idle[0] in swept and expired[0] in swept and active[0] not in swept
+    assert rows(*idle[1:]) == rows(*expired[1:]) == NONE
     assert rows(*active[1:]) == ALL
     db.end_demo_sessions(active[0])
 

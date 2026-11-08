@@ -3,13 +3,15 @@
 One LLM call per message picks closed choices: an intent and policy_pack keys. A follow-up answered from notes makes a
 second one, which writes 1-3 sentences that cite the notes' sentences and pass output_guardrails.check_answer, or the
 notes are quoted, then PayPal's line, or a person on the demo. Every other word the seller reads is written here, by
-scam_check, or comes from PayPal (a title and a link). The buyer's chat goes to scam_check.run() as typed and never
-reaches this module's LLM calls or Tavily. A short message with a payment ID keeps only its IDs, which the price
-looks up with scam_check.lookup() (payment_check, no LLM). The price comes from the seller's own message, read by a
-regex. A seller who asks for a person (the human intent, or the word operator at any step) is asked first whether the
-conversation may be shared: handoff only records the answer, with no LLM and no database. On the demo, the shared
-conversation is then the person's: the seller's messages go to them, never through this graph, until either closes it
-(app/demo.py).
+scam_check or dispute_draft, or comes from PayPal (a title and a link). The buyer's chat goes to scam_check.run() as
+typed and never reaches this module's LLM calls or Tavily. A short message with a payment ID keeps only its IDs, which
+the price looks up with scam_check.lookup() (payment_check, no LLM). The price comes from the seller's own message, read
+by a regex. A short message with a practice dispute ID (PP-SIM-…) goes to dispute_draft.run() without classify: a
+fictional scenario from a file, no PayPal call, no LLM. A real dispute ID gets a fixed text: Vendor Guard doesn't read
+disputes in PayPal (2026-11-07). A seller who asks for a person (the human intent, or the word operator at any step)
+is asked first whether the conversation may be shared: handoff only records the answer, with no LLM and no database.
+On the demo, the shared conversation is then the person's: the seller's messages go to them, never through this graph,
+until either closes it (app/demo.py).
 """
 import base64
 import binascii
@@ -27,8 +29,8 @@ from langgraph.graph import END, START, MessagesState, StateGraph
 from langgraph.runtime import get_runtime
 from pydantic import ConfigDict, create_model
 
-from app import llm, output_guardrails, policy_pack, scam_check
-from app.scam_check import MAX_CHARS, owns, sanitize
+from app import dispute_draft, llm, output_guardrails, policy_pack, scam_check
+from app.scam_check import MAX_CHARS, money as _money, owns, sanitize
 
 log = logging.getLogger(__name__)
 TAVILY_URL = "https://api.tavily.com/search"
@@ -38,9 +40,15 @@ MAX_QUESTION = 400  # longer messages are treated as a pasted chat; also an old 
 INTENTS = ("question", "scam_check", "dispute", "not_paypal", "another_payment", "can_ship", "next_steps", "human",
            "topics", "other")
 DISPUTE_KEYS = ("pp_dispute_vs_claim", "pp_dispute_deadline", "pp_chargeback", "pp_snad_not_covered", "pp_proof_of_delivery")
-# advise's "what now?" after a dispute note: how to respond, and by when
+# the topics' disputes area
 DISPUTE_NOTES = {*DISPUTE_KEYS, "pp_respond_to_dispute", "pp_unauthorized_claim", "pp_proof_of_shipment"}
-RESPOND_KEYS = ("pp_respond_to_dispute", "pp_dispute_deadline")
+RESPOND_KEYS = ("pp_respond_to_dispute", "pp_dispute_deadline")  # advise's "what now?" after one of the notes below
+# a reply that shows one of these, which mean the seller has a dispute, ends by offering a practice dispute and
+# PayPal's line (DRAFT_OR_PAYPAL).
+# Not the proof-of-shipment notes, which answer shipping questions too, nor pp_chargeback: a card case has no draft.
+# ponytail: also after a practice dispute was read, which the chat can't tell (RECHECK #46)
+DRAFT_OFFER_NOTES = {"pp_dispute_vs_claim", "pp_dispute_deadline", "pp_respond_to_dispute", "pp_snad_not_covered",
+                     "pp_unauthorized_claim"}
 
 VERIFIED = policy_pack.verified()
 # "You saw: …" notes: shown only for the seller's own last check, enforced in classify, not only asked in the prompt
@@ -175,17 +183,25 @@ NOT_YET = "Not yet. Your last check ({}) said:"  # only for an outcome that can 
 DONT_SHIP = "No. Your last check ({}) said:"  # a final outcome: waiting won't make this payment safe
 WAIT_FOR = ("P.WAIT_NOT_CLEARED", "P.WAIT_NOT_CONFIRMED")
 SAME_STEPS = "The notes in my last reply are all I have on this."
-# a VERIFIED case answers "can I ship?" only for its own payment: said every time (E07 case 37, RECHECK #30)
+# a VERIFIED case answers "can I ship?" only for its own payment: said every time (E07 case 37)
 ONLY_THAT = "About your last check ({}). It covers only that payment: for another order or buyer, say check."
 DONT_KNOW = f"I don't have that information. PayPal's help for US businesses: {policy_pack.HELP_URL}"
 INTRO = ("Hi! I'm Vendor Guard, and I help PayPal sellers with three things:\n"
          "1. Questions about selling with PayPal: I answer from notes checked against PayPal's pages, "
          "or point you to PayPal's own pages. Say notes to see the topics I have notes on.\n"
          "2. Checking a buyer's payment before you ship.\n"
-         "3. Disputes: how they work. Preparing your response for you to approve is coming soon.")
+         "3. Practising a dispute response: fictional disputes, with a checklist and a draft to paste. You answer your "
+         "own disputes in your PayPal Resolution Center.")
 PERSON = "When I can't help, a person from Vendor Guard can: say operator."  # the intro's last line, on the demo only
-DISPUTE_TEXT = ("The buyer opens a dispute in PayPal, and you, the seller, respond to it. Vendor Guard will prepare that "
-                "response for you to approve before anything is sent. That part isn't ready yet.")
+ASK_ID = ("To practise your response, paste a practice dispute ID, such as PP-SIM-INR-01: I'll show a checklist and a "
+          "draft. It's fictional: you answer your own dispute in your Resolution Center.")
+# a real dispute ID: Vendor Guard doesn't read disputes in PayPal (2026-11-07)
+REAL_DISPUTE = ("I can't read your disputes in PayPal: you respond to them in your Resolution Center. To practise a "
+            "response, paste a practice dispute ID, such as PP-SIM-INR-01.")
+# a dispute's notes end with both, and the seller chooses: practise with Vendor Guard, or ask PayPal (2026-11-07)
+DRAFT_OR_PAYPAL = f"{ASK_ID}\n\n{scam_check.SUPPORT}"
+PRACTICE_FAILED = "I couldn't open practice dispute {} just now. Try again in a moment."
+DISPUTE_TEXT = f"The buyer opens a dispute in PayPal, and you respond to it in your Resolution Center. {ASK_ID}"
 SCOPE = "I can help with selling on PayPal: questions about it, checking a buyer's payment before you ship, and disputes."
 # the topics reply, an area per line in this order. Each verified note falls in one by the sets above (_area); the
 # keys are also fixed words, as check
@@ -225,7 +241,6 @@ LIVE = object()
 LABEL = re.compile(r"(?im)^\s*(buyer|seller)\s*:")  # the screenshot copy's labels, or a seller who pastes them
 NUMBER = r"([0-9]{1,10}(?:[.,][0-9]{1,2})?)"  # as ScamCheckIn: at most 12 digits, 2 of them decimals
 PRICE = re.compile(rf"{NUMBER}\s*([A-Za-z]{{3}})|([A-Za-z]{{3}})\s*{NUMBER}")
-AMOUNT, CURRENCY = re.compile(r"[0-9]{1,10}(?:\.[0-9]{1,2})?"), re.compile(r"[A-Z]{3}")  # last_case's, fullmatch only
 # a self-introduction in a question ("Hi, I'm Amanda, is F&F safe?"): only a capitalised name, so "I am selling" stays
 INTRODUCTION = re.compile(r"\b(?i:i am|i['’]m|my name is|sou [ao]|sou|chamo-me|o meu nome é|meu nome é)\s+"
                           r"[A-ZÀ-Þ][\w'’-]*(?:\s+[A-ZÀ-Þ][\w'’-]*)?")
@@ -261,6 +276,23 @@ GOODBYE = re.compile(r"(?i)\b(?:bye|goodbye|see you|thanks|thank you|obrigad[oa]
 # the only answer that shares the conversation: a short EN/PT yes, fullmatch. Anything else shares nothing
 CONSENT = re.compile(r"(?i)(?:yes|yeah|yep|sure|ok|okay|sim|claro|pode)(?:,? (?:please|por favor))?[ .!]*")
 DATA_URL = re.compile(r"data:image/(?:png|jpeg);base64,([A-Za-z0-9+/=]+)")
+# a real dispute ID: PP-D-<digits> in PayPal's spec, PP-R-<3 letters>-<8 digits> in the sandbox (2026-11-04). Caught
+# so it gets REAL_DISPUTE, not classify: the LLM could write as if it had read the dispute. At the price step it goes
+# to classify, as any text there (a dispute intent then reads the ID)
+REAL_ID = re.compile(r"PP-(?:D-[0-9]{1,12}|R-[A-Z]{3}-[0-9]{8})")
+# a dispute ID in a seller's message, in any case: a practice one, PP-SIM-…, which REAL_ID never matches, or a real one
+DISPUTE_IN = re.compile(rf"(?<![0-9A-Za-z-])(?:{REAL_ID.pattern}|{dispute_draft.SIM_ID.pattern})"
+                        r"(?![0-9A-Za-z-])", re.I)
+# a card chargeback: never the 10-day rule for PayPal's disputes (RECHECK #34). classify swaps pp_dispute_deadline for
+# pp_chargeback when the LLM picks pp_chargeback, or this message or the one before says one, or the last reply showed
+# the chargeback note and this message names no dispute or claim (DISPUTED, the user 2026-11-08), for every node; the
+# dispute node also shows the chargeback note first for a chargeback word in this message. English only: "estorno" is
+# any refund in Portuguese, not only a card's (the user, 2026-11-08).
+# ponytail: common words only. A false match shows the chargeback note for the 10-day rule
+CHARGEBACK = re.compile(r"(?i)\b(?:charge ?backs?|charged back|card issuer)\b")
+# "what now?" right after a message about a dispute or claim: how to respond, whatever note that message got (RECHECK
+# #50). English only, as CHARGEBACK. ponytail: a false match shows PayPal's respond notes instead of "Before you ship"
+DISPUTED = re.compile(r"(?i)\b(?:disput(?:e[sd]?|ing)|claims?)\b")
 
 
 class State(MessagesState, total=False):  # Studio's Chat tab needs a state that extends MessagesState
@@ -344,9 +376,20 @@ def route_in(state) -> str:
         return "classify"  # a question at the price step is answered; anything else gets BAD_PRICE from check
     if state.get("awaiting"):  # never classify while waiting for the chat: what comes is the buyer's
         return "check"
+    if text is not None and dispute_id(text):  # no classify call: a TXN_ID beside it too, so before start_check
+        return "dispute"
     if text is None or text.strip().casefold() == "check" or _looks_like_chat(text):
         return "start_check"
     return "classify"
+
+
+def dispute_id(text: str) -> str | None:
+    """The first dispute ID in a seller's short message, upper-cased, or None. Not in a pasted chat (Buyer:
+    or Seller: lines, or longer than a question), which starts a check."""
+    clean = sanitize(text)
+    if LABEL.search(clean) or len(clean) > MAX_QUESTION or not (m := DISPUTE_IN.search(clean)):
+        return None
+    return m[0].upper()
 
 
 def parse_price(text: str) -> dict | None:
@@ -358,28 +401,45 @@ def parse_price(text: str) -> dict | None:
 
 
 def _body(key: str) -> str:
-    """A note's text without its "Still unsure? … Contact PayPal" line: a reply ends with at most one closing line."""
-    return VERIFIED[key]["text"].removesuffix(f"\n{scam_check.SUPPORT}")
+    return policy_pack.body(VERIFIED[key])
 
 
 def _source(key: str) -> str:
-    url = VERIFIED[key]["source_url"]
-    return f"\nSource: {url}" if url.startswith("https://") else ""  # not README.md#…
+    return policy_pack.source(VERIFIED[key])
+
+
+def _offered(state) -> bool:
+    """The last reply showed a dispute's note, so it already made the practice offer and gave PayPal's line, or it was
+    a practice dispute: they show once per stretch of dispute replies, not on every turn (RECHECK #48, 2026-11-08).
+    ponytail: a reply at the price step showed no closing, yet counts as offered; a state field if that matters"""
+    return bool(DRAFT_OFFER_NOTES & set(state.get("shown") or []))
 
 
 def _note(key: str, sentences: list[str] | None = None) -> str:
-    """A verified entry word for word: title, text (or only some of its sentences) and, for PayPal's, the source."""
-    return f"{VERIFIED[key]['title']}\n{' '.join(sentences) if sentences else _body(key)}{_source(key)}"
+    return policy_pack.note(VERIFIED[key], " ".join(sentences) if sentences else None)
 
 
 def _notes(keys) -> list[str]:
     return [_note(key) for key in keys if key in VERIFIED]
 
 
+def _sentences(text: str) -> list[str]:
+    """A note's sentences. A line ending in ":" and the "- " items under it are one, so a follow-up never quotes a
+    list's heading without its items (E08 case 10, 2026-11-07)."""
+    out, listing = [], False
+    for line in text.splitlines():
+        if listing and line.startswith("- "):
+            out[-1] += f"\n{line}"
+            continue
+        parts = [s for s in SENTENCE.split(line) if s.strip()]
+        out += parts
+        listing = bool(parts) and line.rstrip().endswith(":")
+    return out
+
+
 def _listed(keys) -> list[tuple[str, str]]:
     """(key, sentence) for each sentence of these notes, in order: what <previous> numbers from 1."""
-    return [(key, s) for key in keys or [] if key in VERIFIED
-            for line in _body(key).splitlines() for s in SENTENCE.split(line) if s.strip()]
+    return [(key, s) for key in keys or [] if key in VERIFIED for s in _sentences(_body(key))]
 
 
 def _numbered(listed) -> list[str]:
@@ -411,14 +471,6 @@ def search(question: str) -> list[tuple[str, str]]:
         log.warning("tavily search failed: %s", type(e).__name__)
         return []
     return pages[:3]
-
-
-def _money(amount, currency) -> str | None:
-    """"40.00 USD", or None unless both are well formed: PayPal's amount is outside data. [0-9], not \\d: no other digits."""
-    if (isinstance(amount, str) and isinstance(currency, str) and AMOUNT.fullmatch(amount)
-            and CURRENCY.fullmatch(currency)):
-        return f"{Decimal(amount):.2f} {currency}"
-    return None
 
 
 def last_case(out: dict) -> dict:
@@ -505,6 +557,9 @@ def classify(state):
         # sentences can be quoted again anyway). Never beside the hold-until-tracking sign: that hold is the buyer's
         # story, and the note says to add tracking
         shown = state.get("shown") or []
+        if ("pp_chargeback" in picked or CHARGEBACK.search(f"{question}\n{state.get('last_question') or ''}")
+                or "pp_chargeback" in shown and not DISPUTED.search(question)):  # E08 31; a dispute named: its own
+            picked = list(dict.fromkeys("pp_chargeback" if k == "pp_dispute_deadline" else k for k in picked))
         held = ("vg_signal_payment_held_until_tracking" not in {*picked, *shown}
                 and (HOLD.search(f"{question}\n{state.get('last_question') or ''}") or "pp_payment_hold" in shown))
         entries = [k for k in picked if (k == case_note or k not in VERDICT_NOTES and (k != "vg_verdicts" or case_note))
@@ -514,6 +569,9 @@ def classify(state):
                "sentences": [n for n in choice.sentences if isinstance(n, int)], "last_question": question}
     if out["intent"] == "question":  # the backstop, after the LLM only: written to intent, so nothing runs it again
         out["intent"] = _backstop(state | out) or "question"
+    if out["intent"] == "next_steps":  # advise reads no LLM pick: only the respond notes, after a dispute (RECHECK #50)
+        before = state.get("last_question") or ""
+        out["entries"] = list(RESPOND_KEYS) if DISPUTED.search(before) and not CHARGEBACK.search(before) else []
     return out
 
 
@@ -764,14 +822,17 @@ def question(state):
                       + "".join(_source(k) for k in keys)]
         else:  # the last reply may have shown only some of a note, or the answer step's words: all of it again
             parts += [_note(k, None if k in whole else sentences) for k, sentences in items]
-        # at most one closing line, and at the price step it is _answer's CHECK_STOPPED. The check is offered only
-        # for a note shown in full for the first time, and never right after a check. A note's own PayPal line stays;
-        # else a failed answer step offers more help
+        # one closing, and at the price step it is _answer's CHECK_STOPPED. The check is offered only for a note shown
+        # in full for the first time, and never right after a check. A dispute's note offers a practice dispute and
+        # PayPal's line, for the seller to choose, unless the last reply did. Else a note's own PayPal line; else a failed
+        # answer step offers more help
         offer = (not grounded and OFFER_CHECK_AFTER & {k for k, sentences in items if sentences is None}
                  and not state.get("last_case"))
+        draft = DRAFT_OFFER_NOTES & set(keys) and not _offered(state)
         paypal = any(VERIFIED[k]["text"].endswith(scam_check.SUPPORT) for k in keys)
-        if not state.get("awaiting") and (offer or paypal or ran and not grounded):
-            parts.append(OFFER_CHECK if offer else scam_check.SUPPORT if paypal else _more_help())
+        if not state.get("awaiting") and (offer or draft or paypal or ran and not grounded):
+            parts.append(OFFER_CHECK if offer else DRAFT_OR_PAYPAL if draft else scam_check.SUPPORT if paypal
+                         else _more_help())
         return _answer(state, parts, keys)
     offer = [OFFER_OPERATOR] if _operators() and not state.get("awaiting") else []  # at the price step: CHECK_STOPPED
     if pages := search(_text(state)):
@@ -810,7 +871,7 @@ def _shown(transcript: str) -> str | None:
 @owns("messages", "shown", "awaiting", "price", "held")
 def advise(state):
     """can_ship and next_steps, also from _backstop. The LLM only decided that the seller asks; this answers from
-    last_case and shown, with notes and code's words: no answer step, no search, no PayPal call. Never says the seller
+    last_case, shown and classify's DISPUTED match (entries), with notes and code's words: no answer step, no search, no PayPal call. Never says the seller
     can ship unless the last check was VERIFIED (its own note says so)."""
     case, before = state.get("last_case"), state.get("shown") or []
     key, how = _case_note(case), VERIFIED["vg_how_to_check"]["text"]
@@ -826,8 +887,10 @@ def advise(state):
     elif sign := next((k for k in before if k.startswith("vg_signal_")), None):
         keys = [sign, "vg_before_you_ship"]
         close = OFFER_CHECK if sign in OFFER_CHECK_AFTER and not case else close
-    elif DISPUTE_NOTES & set(before):
-        keys = list(RESPOND_KEYS)
+    elif "pp_chargeback" in before:  # the card issuer decides: never PayPal's 10-day rule (RECHECK #34)
+        keys = ["pp_chargeback"]
+    elif DRAFT_OFFER_NOTES & set(before) or state.get("entries"):  # or the seller's last message named a dispute
+        keys = list(RESPOND_KEYS)  # how to respond. The last reply made the offer (_offered): PayPal's line only
     elif key:
         keys, lead = [key], f"About your last check ({_case_ref(case)}):"
     else:
@@ -843,12 +906,43 @@ def advise(state):
     return _answer(state, parts, keys)
 
 
-@owns("messages", "shown", "awaiting", "price", "held")
+# last_question: reading a dispute ID clears it, as start_check does, so the message before the ID isn't the "previous
+# message" of the next classify. Added 2026-11-06 with the user's go, from the review (a reminder is in the plan)
+@owns("messages", "shown", "awaiting", "price", "held", "last_question")
 def dispute(state):
-    # ponytail: fixed text until dispute_defense exists (1-7 Nov). Then ask here for the dispute ID
-    # (awaiting="dispute_id", read by a regex in check) and start dispute_defense with thread_id = that ID.
-    keys = [k for k in state.get("entries", []) if k in VERIFIED][:2] or [k for k in DISPUTE_KEYS if k in VERIFIED][:2]
-    return _answer(state, [DISPUTE_TEXT, *_notes(keys)], keys)
+    """With a practice ID: dispute_draft's checklist and draft (no PayPal, no LLM); with a real one, REAL_DISPUTE. Without
+    one: how disputes work, from the notes, and the offer to practise. A chargeback gets PayPal's chargeback note first
+    and never the 10-day rule."""
+    text = _text(state) or ""
+    if did := dispute_id(text):
+        return _read_dispute(state, did)
+    picked = [k for k in state.get("entries", []) if k in VERIFIED]
+    # the LLM's pick counts too: "the bank reversed the payment" names no chargeback word (review, 2026-11-06). Not
+    # the last reply's: a PayPal dispute asked about after a chargeback is a PayPal dispute. classify dropped the deadline
+    if CHARGEBACK.search(text) or "pp_chargeback" in picked:
+        keys = [k for k in dict.fromkeys(["pp_chargeback", *picked]) if k in VERIFIED][:2]
+        # not DISPUTE_TEXT: the buyer went to their card issuer, and a card case has no draft to practise
+        return _answer(state, [*_notes(keys), *([] if state.get("awaiting") else [_more_help()])], keys)
+    keys = picked[:2] or [k for k in DISPUTE_KEYS if k in VERIFIED][:2]
+    if _offered(state):  # the last reply made the offer and gave PayPal's line: the notes only
+        return _answer(state, _notes(keys), keys)
+    return _answer(state, [DISPUTE_TEXT, *_notes(keys), *([] if state.get("awaiting") else [scam_check.SUPPORT])], keys)
+
+
+def _read_dispute(state, did: str) -> dict:
+    """dispute_draft on a practice ID, in an empty context: a graph invoked inside a node would store its state in this
+    thread's checkpoints. A file, never PayPal, and any session's. A real ID gets REAL_DISPUTE, with no call at all."""
+    if not dispute_draft.SIM_ID.fullmatch(did):
+        return _answer(state, [REAL_DISPUTE], []) | {"last_question": None}
+    try:
+        out = contextvars.Context().run(dispute_draft.run, did)
+    except Exception as e:
+        log.warning("dispute_draft failed: %s", type(e).__name__)
+        return _answer(state, [PRACTICE_FAILED.format(did)], []) | {"last_question": None}
+    reply = out["reply"]  # its own closing line, except at the price step, where it is _answer's CHECK_STOPPED
+    if state.get("awaiting"):
+        reply = reply.removesuffix(f"\n\n{dispute_draft.ANYTHING_ELSE}")
+    return _answer(state, [reply], out["shown"]) | {"last_question": None}
 
 
 def _area(key: str) -> str | None:
@@ -922,7 +1016,7 @@ def _build(checkpointer=None):
     g = StateGraph(State, input_schema=MessagesState)  # input is messages only: nobody sets a price or an intent
     for node in (classify, start_check, check, question, advise, dispute, other, handoff):
         g.add_node(node)
-    g.add_conditional_edges(START, route_in, ["check", "start_check", "classify", "handoff"])
+    g.add_conditional_edges(START, route_in, ["check", "start_check", "classify", "handoff", "dispute"])
     g.add_conditional_edges("classify", after_classify, ["question", "advise", "start_check", "dispute", "other", "check",
                                                          "handoff"])
     for node in ("start_check", "check", "question", "advise", "dispute", "other", "handoff"):

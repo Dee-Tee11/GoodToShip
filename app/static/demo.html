@@ -34,6 +34,29 @@
   .session { flex: 0 1 46ch; font-size: 13px; line-height: 1.4; color: var(--muted); text-align: right; }
   .session button { margin-top: 4px; }
 
+  /* two menus, kept in the URL's hash (#practice): each shows its own sections, the chat and the trace are shared */
+  .menu { max-width: 1600px; margin: 0 auto; padding: 10px 24px 0; display: flex; gap: 8px; }
+  .menu a { padding: 6px 16px; border: 1px solid var(--rule); border-radius: 999px; background: var(--surface); color: var(--ink); font-weight: 500; text-decoration: none; }
+  .menu a:hover { border-color: var(--pen); }
+  .menu a[aria-current] { background: var(--pen); border-color: var(--pen); color: #fff; }
+  #app:not([data-menu="check"]) .for-check, #app:not([data-menu="practice"]) .for-practice { display: none; }
+  .banner { max-width: 1600px; margin: 10px auto 0; padding: 8px 24px; }
+  .banner p { margin: 0; padding: 8px 14px; border-left: 4px solid var(--warn); background: #fbf1df; border-radius: 4px; font-size: 14px; }
+  /* the Practice disputes tab: a card per fictional scenario, and the last one's checklist in three coloured boxes */
+  .orders .story { margin: 0; color: var(--muted); }
+  .tags { display: flex; flex-wrap: wrap; gap: 6px; }
+  .checklist { display: grid; gap: 10px; }
+  .box { border: 1px solid var(--rule); border-left-width: 5px; border-radius: 6px; padding: 10px 12px; }
+  .box h3 { margin: 0 0 6px; font-size: 15px; }
+  .box ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; font-size: 14px; }
+  .box li { overflow-wrap: anywhere; }
+  .box .why { display: block; margin-top: 2px; color: var(--muted); font-size: 13px; }
+  .box.ready { border-left-color: var(--verified); background: #eef7f1; }
+  .box.ready h3 { color: var(--verified); }
+  .box.missing { border-left-color: var(--scam); background: #fbeceb; }
+  .box.missing h3 { color: var(--scam); }
+  .box.check { border-left-color: var(--muted); background: var(--paper); }
+
   /* three columns, sell | chat | trace; on a wide screen the page fits the window and each column scrolls on its own */
   .layout { max-width: 1600px; margin: 0 auto; padding: 12px 24px 24px; display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.15fr) minmax(0, 1fr); gap: 20px; align-items: start; }
   @media (min-width: 1100px) {
@@ -46,7 +69,7 @@
     .chat .talk { flex: 1 1 0; min-height: 140px; max-height: none; }
     .chat .ask { margin-top: auto; }
   }
-  @media (max-width: 1099px) { .top, .layout { max-width: 760px; } .layout { grid-template-columns: minmax(0, 1fr); } .session { text-align: left; } }
+  @media (max-width: 1099px) { .top, .menu, .layout { max-width: 760px; } .layout { grid-template-columns: minmax(0, 1fr); } .session { text-align: left; } }
 
   .step { background: var(--surface); border: 1px solid var(--rule); border-radius: 6px; padding: 16px 18px 18px; margin-bottom: 16px; }
   .sell > .step:last-child { margin-bottom: 0; }
@@ -155,21 +178,26 @@
 </style>
 </head>
 <body>
-<div id="app">
+<div id="app" data-menu="check">
   <div class="top">
     <div>
       <h1>Vendor Guard sandbox demo</h1>
-      <p>Sell something, pay for it as a test buyer, then ask Vendor Guard whether to ship. Every PayPal call and every step of the check appears on the right as it happens. It all runs in PayPal's sandbox, with no real money.</p>
+      <p>Check a buyer: sell something, pay for it as a test buyer, then ask Vendor Guard whether to ship. Practice disputes: draft a response to a fictional dispute, with no PayPal call. Every PayPal call and every step of the check appears on the right as it happens. It all runs in PayPal's sandbox, with no real money.</p>
     </div>
     <div class="session">
       This session is yours alone. Ending it, or closing this tab, deletes your sales and checks from Vendor Guard. PayPal's sandbox keeps its own record of the payments.
       <div><button class="btn quiet" id="end" type="button">End demo and delete my data</button></div>
     </div>
   </div>
+  <nav class="menu" aria-label="Demo">
+    <a href="#check">Check a buyer</a>
+    <a href="#practice">Practice disputes</a>
+  </nav>
+  <div class="banner for-practice"><p role="note">Fictional scenarios to practise a dispute response. No PayPal data: nothing here happens in PayPal.</p></div>
 
   <main class="layout">
     <div class="sell">
-      <section class="step" aria-labelledby="s1">
+      <section class="step for-check" aria-labelledby="s1">
         <h2 id="s1"><span class="n">1</span> Make a sale</h2>
         <p>What are you selling, and for how much? PayPal's checkout opens in step 2.</p>
         <div class="row">
@@ -178,7 +206,7 @@
         </div>
       </section>
 
-      <section class="step" aria-labelledby="s2">
+      <section class="step for-check" aria-labelledby="s2">
         <h2 id="s2"><span class="n">2</span> Pay as the test buyer</h2>
         <p>Click the PayPal button and log in with this shared test buyer. It is a sandbox account: its money isn't real.</p>
         <dl class="buyer">
@@ -189,12 +217,26 @@
         <p class="note" id="pay-note" role="status"></p>
       </section>
 
-      <section class="step" aria-labelledby="s-orders">
+      <section class="step for-check" aria-labelledby="s-orders">
         <h2 id="s-orders">Your orders</h2>
         <p>Your sales in this session. Mark as shipped adds test tracking to the payment in PayPal, as a seller does after shipping.</p>
         <p class="empty" id="no-orders">No orders yet. Make a sale and pay for it above.</p>
         <ol class="orders" id="orders" hidden></ol>
         <p class="note" id="orders-note" role="status"></p>
+      </section>
+
+      <section class="step for-practice" aria-labelledby="s-practice">
+        <h2 id="s-practice">Practice disputes</h2>
+        <p>Each scenario is a made-up dispute on a made-up sale. Press Get my draft: its ID goes to the chat, and Vendor Guard answers with a checklist and a draft response to paste in the Resolution Center.</p>
+        <ol class="orders" id="practice"></ol>
+        <p class="note" id="practice-note" role="status"></p>
+      </section>
+
+      <section class="step for-practice" aria-labelledby="s-checklist">
+        <h2 id="s-checklist">Your checklist</h2>
+        <p>The last scenario's checklist, as Vendor Guard wrote it in the chat.</p>
+        <p class="empty" id="no-checklist">Pick a scenario above: its checklist appears here.</p>
+        <div class="checklist" id="checklist"></div>
       </section>
 
       <section class="step" id="operator" aria-labelledby="s5" hidden>
@@ -216,12 +258,14 @@
     </div>
 
     <section class="step chat" aria-labelledby="s3">
-      <h2 id="s3"><span class="n">3</span> Ask Vendor Guard</h2>
-      <p>Questions about selling with PayPal, answered from notes checked against PayPal's own pages. To check a payment, pick a buyer's chat or type check.</p>
+      <h2 id="s3"><span class="n for-check">3</span> Ask Vendor Guard</h2>
+      <p class="for-check">Questions about selling with PayPal, answered from notes checked against PayPal's own pages. To check a payment, pick a buyer's chat or type check.</p>
+      <p class="for-practice">Pick a scenario on the left, or paste its ID (it starts with PP-SIM-). The same chat as in Check a buyer.</p>
       <p class="chips-label">Try asking</p>
-      <div class="chips" id="asks"></div>
-      <p class="chips-label" id="scenarios-label">Check a buyer's chat</p>
-      <div class="chips" id="scenarios" role="group" aria-labelledby="scenarios-label"></div>
+      <div class="chips for-check" id="asks"></div>
+      <div class="chips for-practice" id="asks-practice"></div>
+      <p class="chips-label for-check" id="scenarios-label">Check a buyer's chat</p>
+      <div class="chips for-check" id="scenarios" role="group" aria-labelledby="scenarios-label"></div>
       <ol class="talk" id="talk" aria-live="polite"></ol>
       <p class="note" id="with-person" hidden>A person from Vendor Guard has this conversation: your messages go to them, and Vendor Guard doesn't answer. <button class="btn quiet" id="stop-sharing" type="button">Stop sharing</button></p>
       <form class="ask" id="ask">
@@ -237,10 +281,12 @@
     <aside class="trace" aria-labelledby="t">
       <header>
         <h2 id="t">What Vendor Guard is doing</h2>
-        <p>The steps of the check light up as they run. Open any line to see exactly what PayPal or the model returned.</p>
+        <p class="for-check">The steps of the check light up as they run. Open any line to see exactly what PayPal or the model returned.</p>
+        <p class="for-practice">The steps of the draft light up as they run: a file and code, with no PayPal call and no model. Open any line to see what each step read or wrote.</p>
       </header>
-      <ol class="rail" id="rail"></ol>
-      <ul class="log" id="log" aria-live="polite"><li class="empty">Nothing yet. Make a sale or check a chat.</li></ul>
+      <ol class="rail for-check" id="rail"></ol>
+      <ol class="rail for-practice" id="rail-practice"></ol>
+      <ul class="log" id="log" aria-live="polite"><li class="empty"><span class="for-check">Nothing yet. Make a sale or check a chat.</span><span class="for-practice">Nothing yet. Pick a scenario.</span></li></ul>
     </aside>
   </main>
 </div>
@@ -261,11 +307,21 @@ const NODES = [
   ["safe_template", "Falls back to fixed sentences"],
   ["persist_case", "Saves the case"],
 ];
+const DRAFT_NODES = [  // dispute_draft's graph, on the Practice disputes rail
+  ["load_scenario", "Reads the scenario file"],
+  ["classify_case", "Names the dispute type"],
+  ["build_checklist", "Marks each fact ✓ ✗ ?"],
+  ["build_draft", "Writes only the ✓ sentences"],
+  ["write_reply", "Writes the reply, no LLM"],
+];
+const KINDS = {inr: "Item not received", snad: "Item not as described", unauth: "Unauthorized payment",
+               card: "Card or bank case: the card issuer decides", other: "Another reason: no draft for it yet"};
 const $ = (id) => document.getElementById(id);
 let session = null;
 let orders = [];  // the session's sales, oldest first, from the last /demo/api/state
 const shipping = new Set();  // order ids whose Mark as shipped is on its way
 let drawn = "";  // the orders the table and the chips show: the poll redraws them only when they change
+let drawnPractice = "";  // the fictional scenarios the Practice disputes menu shows
 const seenEvents = new Set();
 
 // every outside string goes in as a text node: buyer chats, PayPal bodies and item names are never parsed as HTML
@@ -340,8 +396,8 @@ function divider(text) {
   $("log").append(el("li", {class: "divider"}, text));
 }
 
-function rail(state) {
-  $("rail").replaceChildren(...NODES.map(([name, what]) =>
+function rail(state, id = "rail", nodes = NODES) {
+  $(id).replaceChildren(...nodes.map(([name, what]) =>
     el("li", {id: `node-${name}`, class: state || ""}, el("span", {}, el("b", {}, what), el("br"), name))));
 }
 function mark(name, cls) { $(`node-${name}`)?.setAttribute("class", cls); }
@@ -403,11 +459,23 @@ function note(id, text, bad = false) {
 // ---- sales and webhooks, polled ----
 async function refresh() {
   if (!session) return;
+  const before = sent;  // a message sent while this poll ran knows better what the chat waits for
   let state;
   try { state = await (await api("/demo/api/state")).json(); } catch { return; }
   $("operator").hidden = !state.operators;
   orders = state.sales;
+  if (!sending && sent === before) awaiting = state.awaiting ?? null;  // the server's: after a reload the page's own is null
   drawOrders();
+  const practice = JSON.stringify(state.practice || []);
+  if (practice !== drawnPractice) {
+    drawnPractice = practice;
+    $("practice").replaceChildren(...(state.practice || []).map((p) => el("li", {},
+      el("div", {class: "order-top"}, el("b", {}, p.title)),
+      el("div", {class: "tags"}, el("span", {class: "pill"}, p.reason), el("span", {class: "pill"}, p.stage)),
+      el("p", {class: "story"}, p.story),
+      el("div", {class: "order-acts"}, el("code", {}, p.id),
+         el("button", {class: "btn quiet", type: "button", onclick: () => askDispute(p.id, "practice-note")}, "Get my draft")))));
+  }
   for (const e of state.events) {
     if (seenEvents.has(e.id)) continue;
     seenEvents.add(e.id);
@@ -509,6 +577,26 @@ async function ship(s) {
   }
 }
 
+// a dispute ID to the chat, as a seller pastes it. Never while the chat waits for a check's price or chat, or for the
+// answer about sharing: the ID would be read as that
+function askDispute(id, noteId) {
+  if (sending) return;
+  note(noteId, "");
+  if (awaiting === "consent") return note(noteId, "Answer the question about sharing first: yes, or anything else to keep it to yourself.", true);
+  if (awaiting) return note(noteId, "A check is waiting in the chat: finish it, or type cancel first.", true);
+  if (!$("with-person").hidden) return note(noteId, "A person from Vendor Guard has this conversation. To ask Vendor Guard, press Stop sharing.", true);
+  send(id, false);
+}
+
+// a practice dispute's checklist, grouped by the server (dispute_draft): the page only draws it, as text nodes
+function drawChecklist(groups) {
+  $("no-checklist").hidden = groups.length > 0;  // a card case or an unknown ID has none: the chat says why
+  if (!groups.length) $("no-checklist").textContent = "No checklist for this one: the chat says why.";
+  $("checklist").replaceChildren(...groups.map((g) => el("div", {class: `box ${g.group}`},
+    el("h3", {}, g.heading),
+    el("ul", {}, g.lines.map((x) => el("li", {}, `${x.mark} ${x.text}`, x.why ? el("span", {class: "why"}, x.why) : null))))));
+}
+
 // ---- step 3: buyer's chats to check ----
 function fakeId() {
   const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ0123456789";
@@ -605,16 +693,30 @@ function describe(node, u) {
     case "validate_output": return u.guardrail_errors.length ? ["error", `Rejected: ${u.guardrail_errors.join("; ")}`] : ["graph", "Every sentence is backed by the evidence"];
     case "safe_template": return ["graph", "Fixed sentences, written by code"];
     case "persist_case": return ["graph", u.persisted ? "Case saved" : "Case not saved (database error); the verdict still stands"];
+    case "load_scenario": return u.found === "found" ? ["graph", `Read the scenario from a file, in PayPal's shapes: the dispute, its payment, ${u.tracking.trackers?.length ?? 0} tracker(s). No PayPal call`] : ["error", "No scenario with this ID"];
+    case "classify_case": return ["graph", u.kind ? `Dispute type: ${KINDS[u.kind]}` : "No dispute to classify"];
+    case "build_checklist": {
+      const n = (g) => u.checklist.filter((x) => x.group === g).length;
+      return ["graph", u.checklist.length ? `Checklist: ${n("ready")} ready ✓, ${n("missing")} missing ✗, ${n("check")} to check yourself ?` : "No checklist for this dispute type"];
+    }
+    case "build_draft": {
+      const d = u.draft;
+      if (!d) return ["graph", "No dispute, no draft"];
+      if (d.none) return ["graph", d.none];
+      return ["graph", `Draft to ${d.to === "buyer" ? "the buyer" : "PayPal"}: ${d.sentences.length} sentence(s), each only from ✓ facts${d.missing.length ? `; ${d.missing.length} fact(s) missing` : ""}`];
+    }
+    case "write_reply": return ["graph", `Reply written by code${u.shown.length ? `, with PayPal's note(s) ${u.shown.join(", ")}` : ""}`];
     default: return ["graph", node];
   }
 }
 
-let checking = false;  // a check's steps are on the rail
+let checking = null;  // the graph whose steps are on a rail: scam_check or dispute_draft
 function onLine(msg) {
-  if (!checking && (msg.type === "paypal" || msg.type === "node")) {  // the check's first step
-    checking = true;
-    rail("running");
-    divider(`Check at ${new Date().toLocaleTimeString()}`);
+  if (!checking && (msg.type === "paypal" || msg.type === "node")) {  // the check's, or the draft's, first step
+    checking = msg.graph || "scam_check";
+    if (checking === "dispute_draft") rail("running", "rail-practice", DRAFT_NODES);
+    else rail("running");
+    divider(`${checking === "dispute_draft" ? "Draft" : "Check"} at ${new Date().toLocaleTimeString()}`);
   }
   if (msg.type === "paypal") {
     const q = msg.params ? `?transaction_id=${msg.params.transaction_id || ""}` : "";
@@ -633,8 +735,8 @@ function onLine(msg) {
 }
 
 function checked() {  // a step still running when the check ended never ran
-  if (checking) for (const [name] of NODES) if ($(`node-${name}`).className === "running") mark(name, "skipped");
-  checking = false;
+  document.querySelectorAll(".rail li.running").forEach((li) => li.className = "skipped");
+  checking = null;
 }
 
 async function lines(r, each) {  // NDJSON: each line's object, as it arrives
@@ -655,7 +757,10 @@ async function lines(r, each) {  // NDJSON: each line's object, as it arrives
 }
 
 // ---- the chat ----
-const ASKS = ["What does WAIT mean?", "Is Friends and Family safe for selling?", "I got a dispute, what now?", "check"];
+const ASKS = {  // each menu's "Try asking" chips
+  asks: ["What does WAIT mean?", "Is Friends and Family safe for selling?", "check"],
+  "asks-practice": ["I got a dispute, can you help me write my response?", "When must I respond to a dispute?"],
+};
 const PAYPAL_LINK = /(https:\/\/www\.paypal\.com\/[^\s)]*[^\s.,)])/;  // the chat shows PayPal links only
 
 function bubble(cls, text) {
@@ -666,10 +771,11 @@ function bubble(cls, text) {
 }
 
 const ROUTES = {question: "answered a question", start_check: "started a check", check: "took a step of the check",
-                dispute: "explained disputes", other: "introduced itself", advise: "advised on next steps",
+                dispute: "said it doesn't read disputes in PayPal", other: "introduced itself", advise: "advised on next steps",
                 handoff: "handled a request for a person"};
 
 let sending = false;  // one message at a time, as the server asks
+let sent = 0;  // messages sent, so a poll that started before one doesn't overwrite its awaiting
 let awaiting = null;  // the check's step after the last reply: "price", "chat" or null
 // a screenshot or payment IDs the server holds for the price (chat.check), as the reply's held says
 let held = false;
@@ -680,6 +786,7 @@ async function send(message, typed = true) {
   if (sending || (!message.trim() && !file)) return null;
   if (file && file.size > 3_000_000) { note("ask-note", "The screenshot must be under 3 MB.", true); return null; }
   sending = true;
+  sent++;
   note("ask-note", "");
   // a person may have closed it since the last poll: the notice, and the chat starting over, come before this message
   if (!$("with-person").hidden) await refresh();
@@ -705,12 +812,16 @@ async function send(message, typed = true) {
     }
     if (r.route === "handoff") refresh();  // a yes opened one: seen open now, not at the next poll
     bubble("vg", r.reply);
+    if (r.checklist) drawChecklist(r.checklist);
     awaiting = r.awaiting;
     held = !!r.held;
     const how = r.intent ? `The model picked “${r.intent}”${r.notes.length ? ` and the notes ${r.notes.join(", ")}` : ""}; the reply is written by code.` : "No model call: the code routed it.";
-    const ran = checking ? " It ran scam_check: its steps are above." : "";
+    const ran = checking ? ` It ran ${checking}: its steps are above.` : "";
     const what = r.intent === "not_paypal" ? "said it works with PayPal only"
-      : r.intent === "topics" ? "listed what it has notes on" : ROUTES[r.route] || r.route;
+      : r.intent === "topics" ? "listed what it has notes on"
+      : r.route === "dispute" && !r.dispute_id ? "explained disputes"
+      : r.route === "dispute" && r.dispute_id.startsWith("PP-SIM-") ? "read a simulated dispute from a file, with no PayPal call"
+      : ROUTES[r.route] || r.route;
     log("Chat", "llm", `${what}. ${how}${ran}`, r);
     return r;
   } catch (e) {
@@ -829,6 +940,7 @@ $("op-login").addEventListener("submit", (e) => {
 // ---- start ----
 async function start() {
   rail();
+  rail("", "rail-practice", DRAFT_NODES);
   scenarios();
   session = stored();
   let intro;
@@ -867,7 +979,17 @@ $("stop-sharing").addEventListener("click", async () => {
 $("ask-person").addEventListener("click", () => awaiting === "consent"
   ? note("ask-note", "Answer the question about sharing first: yes, or anything else to keep it to yourself.", true)
   : send("operator", false));
-$("asks").replaceChildren(...ASKS.map((q) => el("button", {class: "chip", type: "button", onclick: () => send(q)}, q)));
+for (const [id, asks] of Object.entries(ASKS)) {
+  $(id).replaceChildren(...asks.map((q) => el("button", {class: "chip", type: "button", onclick: () => send(q)}, q)));
+}
+// the menu in the URL's hash, so a reload or a shared link keeps it: #practice (#disputes, the old real-disputes menu, too), else Check a buyer
+function showMenu() {
+  const menu = {"#disputes": "practice", "#practice": "practice"}[location.hash] || "check";
+  $("app").dataset.menu = menu;
+  document.querySelectorAll(".menu a").forEach((a) => a.hash === `#${menu}` ? a.setAttribute("aria-current", "page") : a.removeAttribute("aria-current"));
+}
+window.addEventListener("hashchange", showMenu);
+showMenu();
 $("end").addEventListener("click", async () => {
   if (!confirm("End the demo and delete your sales and checks from Vendor Guard?")) return;
   try { await api("/demo/api/end", {}); } catch (e) { if (!(e instanceof Ended)) alert(e.message); return; }

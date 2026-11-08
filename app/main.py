@@ -56,6 +56,10 @@ async def healthz():  # async: never waits for a worker thread, so busy checks c
 
 
 def _handle(headers, body: bytes):
+    # ponytail: no freshness or replay check on PAYPAL-TRANSMISSION-TIME (closed as RECHECK #2, 2026-11-07). PayPal
+    # binds the body only by a CRC32, so captured headers could carry a crafted body with a new id. Fine while nothing
+    # acts on stored events (the demo's live log only lists them); before anything does, reject an old transmission
+    # time and re-fetch the event from PayPal by id (a GET)
     try:
         event = json.loads(body)
     except ValueError:

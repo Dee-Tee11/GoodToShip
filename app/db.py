@@ -22,6 +22,8 @@ SCHEMA = (
     """CREATE TABLE IF NOT EXISTS demo_sessions (
     id text PRIMARY KEY,
     last_seen timestamptz NOT NULL DEFAULT now())""",
+    # for DEMO_MAX; Neon's table predates it (its open sessions get now(), so they last DEMO_MAX from this boot)
+    "ALTER TABLE demo_sessions ADD COLUMN IF NOT EXISTS created_at timestamptz NOT NULL DEFAULT now()",
     """CREATE TABLE IF NOT EXISTS demo_sales (
     order_id text PRIMARY KEY,
     session_id text NOT NULL REFERENCES demo_sessions ON DELETE CASCADE,
@@ -32,6 +34,8 @@ SCHEMA = (
     created_at timestamptz NOT NULL DEFAULT now())""",
     # the test tracking number the demo added in PayPal (demo.ship_order); Neon's table predates it
     "ALTER TABLE demo_sales ADD COLUMN IF NOT EXISTS tracking text",
+    # the demo's test disputes, removed 2026-11-07 (practice disputes only): a no-op once Neon has dropped them
+    "ALTER TABLE demo_sales DROP COLUMN IF EXISTS dispute_id",
     """CREATE TABLE IF NOT EXISTS demo_cases (
     case_id text PRIMARY KEY,
     session_id text NOT NULL REFERENCES demo_sessions ON DELETE CASCADE)""",
@@ -48,8 +52,11 @@ SCHEMA = (
     updated_at timestamptz NOT NULL DEFAULT now(),
     closed_at timestamptz)""",
     "CREATE UNIQUE INDEX IF NOT EXISTS handoffs_one_open ON handoffs (session_id) WHERE status = 'open'",
+    "DROP INDEX IF EXISTS webhook_events_disputed",
 )
 DEMO_IDLE = "30 minutes"  # a demo session with no request for this long is over
+# and this long after it started, even while its tab polls: what it holds in memory (app/demo.py) can't pile up
+DEMO_MAX = "2 hours"
 # the PayPal ids of a session's sales: webhook events about them have one of these as resource.id
 SALE_IDS = ("SELECT order_id FROM demo_sales WHERE session_id = ANY(%(ids)s) "
             "UNION SELECT capture_id FROM demo_sales WHERE session_id = ANY(%(ids)s) AND capture_id IS NOT NULL")
@@ -108,11 +115,13 @@ def new_demo_session(session_id: str) -> None:
 
 
 def touch_demo_session(session_id: str) -> bool:
-    """True, and the session's clock restarts, if it exists and has not been idle for DEMO_IDLE."""
+    """True, and the session's clock restarts, if it exists, has not been idle for DEMO_IDLE and is younger than
+    DEMO_MAX."""
     with _connect() as c:
         cur = c.execute(
-            "UPDATE demo_sessions SET last_seen = now() WHERE id = %s AND last_seen > now() - %s::interval",
-            (session_id, DEMO_IDLE),
+            "UPDATE demo_sessions SET last_seen = now() WHERE id = %s AND last_seen > now() - %s::interval "
+            "AND created_at > now() - %s::interval",
+            (session_id, DEMO_IDLE, DEMO_MAX),
         )
         return cur.rowcount == 1
 
@@ -236,14 +245,14 @@ def demo_state(session_id: str) -> dict:
 
 
 def end_demo_sessions(session_id: str | None = None) -> list[str]:
-    """Deletes one session, or every idle one, with all it left: cases, claimed payments and webhook events.
-    Returns the ids it deleted."""
+    """Deletes one session, or every idle or expired one (DEMO_MAX), with all it left: cases, claimed payments and
+    webhook events. Returns the ids it deleted."""
     with _connect() as c:  # one transaction: all of it goes, or none
         if session_id:
             ids = [session_id]
         else:
-            ids = [r[0] for r in c.execute("SELECT id FROM demo_sessions WHERE last_seen <= now() - %s::interval",
-                                           (DEMO_IDLE,))]
+            ids = [r[0] for r in c.execute("SELECT id FROM demo_sessions WHERE last_seen <= now() - %s::interval "
+                                           "OR created_at <= now() - %s::interval", (DEMO_IDLE, DEMO_MAX))]
         if not ids:
             return []
         p = {"ids": ids}

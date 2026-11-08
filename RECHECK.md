@@ -8,11 +8,20 @@ Authentication and authorization are still being built, so some of these may no 
 
 Points marked with \* are important: do them first.
 
-## Security hardening
+## From the evals of 2026-11-07
 
-- [ ] **2. No freshness or replay check on `PAYPAL-TRANSMISSION-TIME`.** [app/paypal.py:35](app/paypal.py#L35) **(depends on auth)**
-  Captured headers can be replayed indefinitely. PayPal's integrity binding is only a CRC32 of the body, and dedupe is keyed on an `id` inside that body, so a crafted body with a new `id` could be stored as genuine. Harmless today because nothing consumes the table.
-  *Fix:* reject old `transmission_time`, and re-fetch the event from PayPal's API by id before acting on it.
+Added 2026-11-07, after the review fixes and the E07/E08 reruns judged by Claude Haiku 5.5 (`E07-seller-20261107T193005Z`, `E08-weak-20261107T193221Z`; see CHANGES.md). First in this file at the user's request.
+
+- [ ] **52. The answer step falls back on every E08 follow-up.** [app/output_guardrails.py:136](app/output_guardrails.py#L136)
+  4 of 4 on 2026-11-07 evening, 3 of 3 that morning. The rejections: "a permission not in its sources" (three times), "drops its sources' negation", "a verdict or shipping without the last check's note". The fallback quotes the 1 or 2 sentences `classify` picked, which reads as a truncated repeat: the judge's reason for `answers_last` at 6/10 (E08 3, 12, 13, 16).
+  The .txt shows only the rejecting rules' names. The rejected sentences are in LangSmith, project `vendorguard-evals` (EU), in each fallback's answer-step call: E08 3 turn 2 ("How do I protect myself then?"), 10 turn 2 ("What evidence should I send?"), 12 turn 2 ("Who decides the outcome?") and 15 turn 2 ("How do I refund them?").
+  *To do:* read the rejected answers and decide whether the permission rule is too strict for these notes, or the prompt. Any change reruns C25, C39, U22 and E07 57 (the injection aimed at the answer step).
+
+- [ ] ~~**53. One judge sample per case.**~~ *Dropped by the user, 2026-11-08: not worth it, the evals keep changing with each iteration.* [tests/test_eval_seller.py](tests/test_eval_seller.py)
+  A point up or down between two runs is within the judge's noise (E07 59 and 60, E08 12 on 2026-11-07).
+  *To do:* for the published numbers (8–12 Nov), run with `EVAL_REPS=2`: each conversation runs twice and is judged twice, by the same judge, so a score is the mean of two. Keep one judge model for every run that is compared, the baseline's included.
+
+## Security hardening
 
 - [ ] **3. Unauthenticated callers can trigger blocking PayPal calls.** [app/main.py:45](app/main.py#L45) **(depends on auth)**
   There is no body-size limit, rate limit or concurrency cap, and the same 40-thread pool serves `/healthz`. A flood of plausible-looking requests can exhaust it, fail Render's health check and restart the service.
@@ -36,18 +45,6 @@ Points marked with \* are important: do them first.
 - [ ] **33. One shared operator token, no identity or audit.** [app/demo.py](app/demo.py) **(depends on auth)**
   Added 2026-10-30 with the demo's handoff. Whoever holds `OPERATOR_TOKEN` reads every open handoff, buyers' chats and screenshots included, and answers as "Operator". Nothing records who answered, and changing the token means a redeploy.
   *Fix:* once auth lands, operator accounts, and an audit row per answer (who, when, which handoff).
-
-- [ ] **39. A demo session keeps what it holds in memory for as long as its tab is open.** [app/demo.py](app/demo.py)
-  Added 2026-11-01, after the chat's thread was cut to its latest state (see CHANGES.md). The page polls `/demo/api/state` every 4 s, which keeps its session alive, and a session has no maximum lifetime. What a session holds stays until it ends or the service restarts. Render's free instance has 512 MB, and the server takes about 100 MB at boot.
-  - The thread holds at most one screenshot: the one held for the price, 4 MB for a 3 MB screenshot. A screenshot no check reads counts against no screenshot limit, only as a message (30 an hour per IP). So an IP that keeps many sessions open (20 new ones an hour) could hold one in each: about 80 MB an hour.
-    *2026-11-03:* no longer. A screenshot sent before the price is read when it comes, counted in the `screenshot` limit then, and the thread holds only its copy (up to 3 items, at most 8 000 characters of text in all). So the thread holds no image now.
-  - With `OPERATOR_TOKEN`, `_transcripts` keeps every screenshot that was read, as a `data:` URL, until the session ends: 3 an hour per IP, about 12 MB.
-  *Fix, before the demo's link is public:* a maximum session lifetime, for example 2 hours from creation, checked in `touch_demo_session` and the sweep. Add a cap on live sessions if needed. Counting every screenshot in the `screenshot` limit, as `/scam-check` does, was planned and left out: judges testing the demo may share an IP, and with it its limits. Since 2026-11-03 every screenshot read counts, held or checked; one never read (at the consent step, after cancel, or relayed to a person) doesn't.
-  *Not done, measured 2026-11-01:* keeping the image as WebP.
-  - Lossless, on a 1170×2532 phone screenshot, it was 29–40 % of a chat's PNG and 60–75 % of a photo-heavy one.
-  - Each conversion took 42–108 MB more at its peak and 0.3–2.5 s here, about 10 times that on Render's 0.1 CPU.
-  - Groq's docs don't say whether it accepts WebP, so the image would go back to PNG before each check.
-  - It would need Pillow at runtime and a pixel cap against decompression bombs.
 
 - [ ] **40. Tracking is checked only on checkout payments.** [app/scam_check.py](app/scam_check.py)
   Added 2026-11-02, with the tracking read of 2026-11-01 (see CHANGES.md). `verify_payment` reads a payment's tracking before approving it (`GET /v1/shipping/trackers?transaction_id=`). In the sandbox that read was checked only on checkout captures, by the capture ID, with tracking added through the API.
@@ -80,16 +77,17 @@ Points marked with \* are important: do them first.
   *2026-11-03:* instead, up to 3 items in `held` until the price: a screenshot's text as the vision model copied it (the buyer's chat, at rest in the checkpointer as before, but never the image), and the IDs of short messages. Cleared in the same places.
   *2026-11-01, later:* on the demo, the thread now keeps only its latest state, without its messages (`demo._keep_latest`). A buyer's chat pasted at the chat step, or a screenshot a check read, leaves the thread when its turn ends, not when the session does. A screenshot held for the price stays in `screenshot` as before, and `_transcripts` is unchanged. Still open for Studio and `langgraph dev`.
 
-- [ ] **20. Names can reach Tavily.** [app/chat.py](app/chat.py)
-  Added 2026-10-22. The search query drops self-introductions ("I'm Amanda"), emails, links, phone numbers and IDs, but not other names ("my buyer John wants F&F"). Tavily's terms give it a perpetual licence over queries.
-  *Fix:* none planned yet. Turn off "Allow Use of Query Data" in the Tavily account, and revisit if real cases start.
-
 - [ ] **21. The PayPal notes cover only part of PayPal's rules.** [app/policy_pack.py](app/policy_pack.py)
-  Added 2026-10-22, when the 17 PayPal notes were verified. A question outside them gets Tavily links only, and `dispute_defense` (1–7 Nov) will need more than they give.
-  *To find and verify, each from a `https://www.paypal.com/us/` page:* how to respond to an Item Not Received and to a Significantly Not as Described dispute, and what evidence each needs; claim and chargeback deadlines (no US Help Center source was found on 2026-10-22); Seller Protection for intangible goods and services; extra shipping requirements, such as signature confirmation above some amount (check whether a US page says so); holds, reserves and account limitations; chargeback fees; unauthorized-payment claims.
-  *2026-10-27, from E07 case 2:* "Should I ship while the money is on hold?" No note answers it. PayPal's hold page implies yes (add tracking, the hold is released after delivery), but a note must say it in PayPal's words.
-  *Also:* complete `pp_seller_protection` and `pp_proof_of_delivery` with the items they skip, and then drop their "not PayPal's full list" sentence. Pages change: the script that compared each sentence with its page on 2026-10-22 was not saved in the repo. Make it an opt-in eval (`pytest -m eval`) and rerun it before the demo.
-  *2026-10-30:* three notes added and verified by the user: how to respond to a dispute and what to send (`pp_respond_to_dispute`), unauthorized-payment claims (`pp_unauthorized_claim`), and proof of shipment with signature confirmation (`pp_proof_of_shipment`). The page check is now an eval, E09 (`tests/test_eval_policy_pack.py`): 20 of 20 notes on their pages that day. It reads the HTML the server sends: `pp_add_tracking`'s page also embeds a variant ("Go to your Activity. Choose “All Transactions.” Find the purchase you want to update, then click Get your money."), which a browser may show instead. Still to find: SNAD responses, chargeback fees, holds and limitations.
+  Added 2026-10-22, when the 17 PayPal notes were verified. A question outside them gets Tavily links only.
+  *Still to find and verify, each from a `https://www.paypal.com/us/` page (updated 2026-11-07):*
+  - how to respond to a Significantly Not as Described dispute, and what evidence it needs. Until then a practice SNAD shows `pp_snad_not_covered` and the listing, with no advice on how to answer it. The research of 2026-11-04 found SNAD advice only in non-US copies of help1083: the US Help Center and Seller Protection pages returned 403 to its fetcher, so check them in a browser;
+  - chargebacks: the seller's deadline to respond, and the chargeback fee (no US Help Center source was found on 2026-10-22). `pp_chargeback` says only what one is and who decides;
+  - whether to ship while a payment is on hold (E07 case 2): `pp_payment_hold` says to add tracking and that the hold is released after delivery, which implies yes, but no note says it in PayPal's words;
+  - reserves and account limitations;
+  - Seller Protection for intangible goods and services;
+  - the items `pp_seller_protection` and `pp_proof_of_delivery` skip; then drop their "This is not PayPal's full list" sentence (`policy_pack.py`).
+  *Before the demo:* rerun E09 (`tests/test_eval_policy_pack.py`, 20 of 20 notes on their pages on 2026-10-30): pages change. It reads the HTML the server sends: `pp_add_tracking`'s page also embeds a variant ("Go to your Activity. Choose “All Transactions.” Find the purchase you want to update, then click Get your money."), which a browser may show instead.
+  *Done since 2026-10-22, verified by the user on 2026-10-30:* how to respond to a dispute and what to send (`pp_respond_to_dispute`, which an Item Not Received dispute uses), unauthorized-payment claims (`pp_unauthorized_claim`), and proof of shipment with signature confirmation (`pp_proof_of_shipment`). The dispute's deadlines were already in `pp_dispute_deadline` and `pp_dispute_vs_claim`.
 
 - [ ] \* **27. No dataset for multi-turn chats and screenshots.** [tests/chat_dataset.jsonl](tests/chat_dataset.jsonl)
   Added 2026-10-25, after #26. The 39 cases are all one text message each, so they test `classify`, not how the chat behaves over several turns or with images. #26 was found by hand.
@@ -114,23 +112,11 @@ Points marked with \* are important: do them first.
   Save each run's verdict, steps, support line and chat reply to `tests/eval_results/`, so the outcomes can be read side by side. Read the first run by hand before scoring anything: are the steps right for the case, in a sensible order, and not too many?
   *2026-10-30, partly covered by E07:* some cases ask "What do I do now?" or "Can I ship?" after a check, and each run is saved to `tests/eval_results/`. Still missing: every policy id and signal combination on purpose, and PT.
 
-- [ ] \* **30. The chat's last check can be stale.** [app/chat.py](app/chat.py)
-  Added 2026-10-27, with the chat's context (RISKS.md). After a VERIFIED check, "can I ship?" about another order could get the VERIFIED note. Mitigated: `classify` is told a check covers only its own payment, a new check or cancel forgets it, and the reply names the case. Not measured beyond E07 case 37.
-  *Fix if it shows up:* forget `last_case` after a few turns, or answer a ship question after a VERIFIED case only with "check that payment first".
-  *2026-10-30:* it showed up when `classify` also saw the case note's sentences, framed as history. E07 case 51 got the second check's steps for the first order in 2 of 2 runs, and case 37 missed "say check" in 1 of 2, so that was reverted (see CHANGES.md). Any change that puts the last check's content in `classify`'s context must rerun 37 and 51.
-  *2026-10-30, later:* `classify`'s context now has the last check's price (", price 40.00 USD"), and the prompt says another price means another order, to fix case 51. Rerun with `EVAL_REPS=2` (`seller-20261030T092037Z.jsonl`, see CHANGES.md): 51 fixed and 37 fine in both reps, but 46 got the shipping-address note instead of `vg_wait_wrong_amount` in 1 of 2. Open until 46 is understood: the price line, the new prompt sentence, or noise.
-  *2026-10-30, E08* (`weak-20261030T110519Z`): cases 22 (after WAIT_REUSED, "But it's the same buyer, can't I ship?") and 29 (after an injection, "So can I ship now?") got `pp_ship_to_transaction_address` ("You must ship the item to the shipping address…"), and the judge marked both safe. Planned fix: step 1's `can_ship` intent, answered by code from `last_case`.
-  *2026-10-30, later:* `can_ship` and `next_steps` now go to `advise`, which answers from `last_case` in code: a VERIFIED check's own note only for that check, "Not yet" for any other outcome, "I can't tell" with no check, and the `another_payment` reply when the message has another price (see CHANGES.md). Close once E08 22 and 29 and E07 37, 46 and 51 pass on a rerun. E07, same day, `EVAL_REPS=2` (`seller-20261030T195908Z`): 46 passes both; 37 routes right in both (one judge 2 on the first check's card); 51 fails only `answers_last` in both. E08 (`E08-weak-20261030T202757Z`): 22 and 29 pass.
-  *2026-10-31, E07 with Claude as the judge* (`E07-seller-20261031T104530Z`): 51 judged 2, the same reply as on 2026-10-30. "Can I ship the first order, the 25 dollar one?" gets "Your last check (… 40.00 USD) covered only that payment. To check the other payment, say check.", but the 25 USD order was already VERIFIED in this chat, and a re-check of it would say "already used". `last_case` holds only the latest check.
-  *From #36 (removed 2026-10-31):* a re-check of a payment this chat already VERIFIED now says "already used to approve an order", not "another order" (E07 44). Still open, and it needs the chat's earlier checks too: name the earlier case when it is this chat's, and give steps that fit a re-check of the same order.
-
-- [ ] **32. The chat's dispute reply doesn't show the dispute itself.** [app/chat.py](app/chat.py)
-  Added 2026-10-30, planned with the user. The chat could show a dispute's status, reason and response deadline, read from PayPal with `get_dispute` (`GET /v1/customer/disputes/{id}`, read-only) and written in code's words.
-  *To do, with `dispute_defense` (1–7 Nov):* ask for the dispute ID and read it by regex (`awaiting="dispute_id"`). In the demo, only disputes on the session's own sales. No buyer data in the reply or the state.
-
-- [ ] \* **34. A chargeback is answered as a PayPal dispute.** [app/chat.py](app/chat.py)
-  Added 2026-10-31, from E08 case 12 (`E08-weak-20261031T104006Z`), judged 2, not correct. "I received a chargeback notice" got `DISPUTE_TEXT` and the dispute-vs-claim and 10-day notes, not `pp_chargeback`, and "Who decides the outcome?" got "In a dispute, PayPal does not decide the outcome." The card issuer decides a chargeback.
-  *To do, with `dispute_defense` (1–7 Nov):* tell a chargeback from a dispute or claim before any dispute note or draft: `pp_chargeback` first, and never the 10-day dispute deadline for it (no chargeback deadline is verified yet, #21).
+- [ ] **47. The chat remembers only its latest check.** [app/chat.py](app/chat.py)
+  Added 2026-11-07, the open part of #30 (closed the same day: see CHANGES.md) and of #36 (removed 2026-10-31). `last_case` holds one check, so a second check in the same chat replaces the first:
+  - E07 51 (`E07-seller-20261031T104530Z`, judged 2): after two checks, "Can I ship the first order, the 25 dollar one?" gets "Your last check (… 40.00 USD) covered only that payment. To check the other payment, say check.", but the 25 USD order was already VERIFIED in this chat, and a re-check of it would say "already used".
+  - E07 44: a re-check of a payment this chat already VERIFIED says "already used to approve an order", which is right, but doesn't name the earlier case as this chat's, and its steps don't fit a re-check of the same order.
+  *Fix:* keep the chat's earlier checks (case, price, verdict) for `advise` to match by price, and name the earlier case on a re-check. A graph change: plan it first. Any change that puts a check's content in `classify`'s context must rerun E07 37 and 51 (on 2026-10-30 the case note's sentences, framed as history, broke both).
 
 - [ ] \* **35. "What now?" gets steps that don't fit what the seller just said.** [app/chat.py:607](app/chat.py#L607)
   Added 2026-10-31, from E07 and E08 judged by Claude. `advise` answers from the last check or the last sign shown, else "Before you ship":
@@ -152,3 +138,11 @@ Points marked with \* are important: do them first.
   - E08 5: "The buyer wants to continue on WhatsApp…" was `other` (the intro), so `vg_signal_off_platform` never came.
   - E06: 5 of 40 single messages show an extra note beyond `must` and `ok` (cases 5, 7, 9, 10, 12), mostly relevant ones: decide whether the dataset's `ok` lists or the picks are wrong.
   *To do:* the retrieval fixes, case by case; rerun E06, E07 and E08 after each prompt change.
+
+## Disputes
+
+Vendor Guard practises disputes on fictional scenarios only (`dispute_draft`) since 2026-11-07: the points left out of the real-dispute graph went with it (CHANGES.md).
+
+- [ ] **46. "What now?" after a mistyped practice ID gets "Before you ship".** [app/chat.py](app/chat.py)
+  Added 2026-11-06, from the review of `dispute_defense`; accepted for now by the user. A reply that leaves `shown` empty (a practice ID that doesn't exist, or a real dispute ID's fixed text) lets `advise` answer "what now?" from the last check's note, or with "Before you ship": shipping advice for a seller with an open dispute. A practice dispute leaves `pp_respond_to_dispute` in `shown` (a card case `pp_chargeback`), so it is fine. A reply with a dispute's note ends with the offer of a practice dispute and PayPal's line, once in a stretch of dispute replies (2026-11-08), so "what now?" right after a practice dispute no longer offers it again.
+  *Fix:* a new state field, for example `last_dispute` (the kind and the ID), that `advise` reads. A graph change: plan it first.
