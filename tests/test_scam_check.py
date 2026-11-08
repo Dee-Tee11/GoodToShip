@@ -27,9 +27,9 @@ def days_ago(n):
 
 COMPLETED = {"id": TID, "status": "COMPLETED", "amount": {"value": "25.00", "currency_code": "EUR"},
              "create_time": days_ago(1)}
-PAID = f"Olá! Já paguei pelo PayPal, o ID é {TID}."
-SCAM_CHAT = PAID + " Preciso que envie hoje sem falta! Fala comigo no WhatsApp."
-TWO_SIGNALS = {"urgency_pressure": "Preciso que envie hoje sem falta", "off_platform": "Fala comigo no WhatsApp"}
+PAID = f"Hi! I already paid with PayPal, the ID is {TID}."
+SCAM_CHAT = PAID + " I need you to ship today without fail! Talk to me on WhatsApp."
+TWO_SIGNALS = {"urgency_pressure": "I need you to ship today without fail", "off_platform": "Talk to me on WhatsApp"}
 GOOD_DRAFT = [Sentence(intent="EXPLAIN_SIGNAL", text="In the chat, the buyer {{E2.label}}.", sources=["E2"])]
 GROQ = "https://api.groq.com/openai/v1/chat/completions"
 PNG = b"\x89PNG\r\n\x1a\n" + bytes(8)  # the app checks only the first bytes; the vision call is mocked
@@ -467,14 +467,14 @@ def test_s02_unverifiable_quotes_never_make_a_scam(api, llm_stub, saved):
 
 
 @pytest.mark.parametrize("quote, confirmed", [
-    pytest.param("Devolva-me a diferenca", True, id="accent and case differ"),
-    pytest.param("devolva‑me  a  diferença", True, id="other hyphen and spacing"),
-    pytest.param("paguei", False, id="in the chat but under 8 letters"),
+    pytest.param("Send me the DIFFÉRENCE back", True, id="accent and case differ"),
+    pytest.param("by  e‑transfer  please", True, id="other hyphen and spacing"),
+    pytest.param("paid", False, id="in the chat but under 8 letters"),
     pytest.param("send the difference back", False, id="not in the chat"),
 ])
 def test_s02_quote_confirmation(llm_stub, quote, confirmed):
     llm_stub.signals = {"overpayment_refund": quote}
-    chat = scam_check.sanitize("Já paguei a mais, devolva-me a diferença por MB WAY.")
+    chat = scam_check.sanitize("I paid too much, send me the difference back by e-transfer please.")
     assert scam_check.detect_signals({"chat": chat})["signals"][0]["confirmed"] is confirmed
 
 
@@ -540,7 +540,7 @@ def test_s03_prompts_hold_no_tools_no_secrets_and_explain_sees_no_buyer_text(api
 
 
 def test_s03_read_image_rejects_cut_off_copies_and_non_images(api):
-    groq = api.post(GROQ).mock(return_value=completion("Buyer: Já paguei", finish="length"))
+    groq = api.post(GROQ).mock(return_value=completion("Buyer: I already paid", finish="length"))
     with pytest.raises(RuntimeError):
         llm.read_image("prompt", PNG)
     with pytest.raises(ValueError):
@@ -566,7 +566,7 @@ def test_s03_ask_rejects_truncated_output(api):
 def test_s04_the_llm_cannot_tell_the_seller_to_ship(api, llm_stub, saved, text):
     capture(api, httpx.Response(404))
     search(api)
-    llm_stub.signals = {"urgency_pressure": "Preciso que envie hoje sem falta"}
+    llm_stub.signals = {"urgency_pressure": "I need you to ship today without fail"}
     llm_stub.draft = [Sentence(intent="EXPLAIN_SIGNAL", text=text, sources=["E2"])]
     out = run(SCAM_CHAT)
     assert out["template"] is True and out["message"] == scam_check.POLICY["P.WAIT_NOT_CONFIRMED"]
@@ -606,14 +606,14 @@ def test_api_checks_a_screenshot_alone_and_never_returns_its_text(api, llm_stub,
     llm_stub.transcript = f"Buyer: {PAID}"
     r = client.post("/scam-check", json=BODY | {"image": b64(image)})
     assert r.status_code == 200 and r.json()["verdict"] == "VERIFIED"
-    assert "paguei" not in json.dumps(r.json()) and "paguei" not in json.dumps(saved)
+    assert "already paid" not in json.dumps(r.json()) and "already paid" not in json.dumps(saved)
 
 
 def test_screenshot_and_pasted_text_are_one_chat(api, llm_stub, saved):
     """The id is only in the paste and the warning signs only in the screenshot: both count."""
     capture(api, httpx.Response(404))
     search(api)
-    llm_stub.transcript = "Buyer: Preciso que envie hoje sem falta!\nBuyer: Fala comigo no WhatsApp."
+    llm_stub.transcript = "Buyer: I need you to ship today without fail!\nBuyer: Talk to me on WhatsApp."
     llm_stub.signals = TWO_SIGNALS
     assert scam_check.run(PAID, "25.00", "EUR", PNG)["verdict"] == "SCAM_LIKELY"
 

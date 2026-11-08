@@ -5,7 +5,7 @@ exec(open(sys.argv[2]).read().split("NOTES = ")[0])  # reuse words()/STOP from t
 from app import chat
 NOTES = [(k, s, words(s)) for k, s in chat._listed(list(chat.VERIFIED))]
 def cov(ws, o): return len(ws & o) / len(ws) if ws else 1.0
-META = re.compile(r"Vendor Guard (may|must|never|can't|explains|doesn't)")
+META = re.compile(r"GoodToShip (may|must|never|can't|explains|doesn't)")
 rows = list(map(json.loads, open(sys.argv[1])))
 holders = collections.Counter()
 print(f"{'id':>3} {'pass':<4} {'judge':<5} {'any':>5} {'last':>5}  failing criteria")

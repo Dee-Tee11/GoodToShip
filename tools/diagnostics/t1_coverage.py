@@ -4,7 +4,7 @@ from app import chat
 STOP = set("""a an the and or but if then so to of in on at by for with from as is are was were be been it its this that
 these those you your yours they their them he she we our i my me do does did not no can could may might will would should
 must have has had there here what which who when where why how than also only just any all each every one before after
-about into out up down over vendor guard paypal s t don doesn isn aren wasn weren won""".split())
+about into out up down over goodtoship paypal s t don doesn isn aren wasn weren won""".split())
 def words(t):
     out = set()
     for w in re.findall(r"[a-z0-9]+", t.lower()):

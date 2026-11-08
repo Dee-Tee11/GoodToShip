@@ -25,7 +25,7 @@ The user names a part of this conversation (an assessment, a list of priorities,
      - A graph change (node, intent, state field) needs the user's go on the plan before any code.
      - No commit or push without an explicit go.
      - A fixed RECHECK point is deleted, and its fix goes in `CHANGES.md`.
-     - Vendor Guard only reads PayPal: no new PayPal write. The sandbox demo's order, capture and test tracking are the only ones.
+     - GoodToShip only reads PayPal: no new PayPal write. The sandbox demo's order, capture and test tracking are the only ones.
    - **Checked** and **Not checked**: the two lists from step 2.
    - **What to plan, in order**: one lettered item per piece of work, in the order agreed in the conversation. Each one gives what to do, the RECHECK numbers it closes and the decisions for the user. A decision is a question with the options, and the session gives its recommendation.
    - **For each item, the plan gives**: the files and functions it touches; new tests numbered after the existing series; the invariants it touches and how they hold; extra PayPal and Groq calls per check; the E06/E07 cases to rerun (a `classify` change always reruns E07 cases 37, 46 and 51); the edits to RECHECK, CHANGES and README. Then "give the plan item by item and wait for my go on each."

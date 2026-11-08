@@ -1,6 +1,6 @@
 services:
   - type: web
-    name: VendorGuard
+    name: GoodToShip
     runtime: python
     region: oregon
     plan: free

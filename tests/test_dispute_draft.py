@@ -352,7 +352,7 @@ def test_u40_an_unverified_respond_note_isnt_shown(monkeypatch):
 
 
 def test_u40_no_reply_speaks_of_the_outcome():
-    """Vendor Guard's own words: PayPal's notes, and the quotes from them, are PayPal's."""
+    """GoodToShip's own words: PayPal's notes, and the quotes from them, are PayPal's."""
     words = [chat._note(k) for k in chat.VERIFIED] + [q for _, q in dispute_draft.QUOTES.values()]
     for did in IDS:
         reply = dispute_draft.run(did)["reply"]

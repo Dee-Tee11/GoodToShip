@@ -1,7 +1,7 @@
 """dispute_draft: practice disputes. A seller pastes a PP-SIM-… ID (the demo's Practice disputes tab) and reads a
 checklist grouped by what to do with each line, and a draft response to paste in the Resolution Center. Every fact
 comes from a fictional scenario in app/demo_disputes.json, in PayPal's own shapes (a dispute, a capture, its trackers),
-never from PayPal: Vendor Guard doesn't read real disputes (decided 2026-11-07).
+never from PayPal: GoodToShip doesn't read real disputes (decided 2026-11-07).
 
 No PayPal call, no database, no LLM, no interrupt(). Every word is this module's, a scenario value validated here, or
 a verified policy_pack note quoted word for word. A draft sentence prints only when every fact it needs is ✓: what is
@@ -66,7 +66,7 @@ SCENARIOS = {s["id"]: s for s in json.loads((Path(__file__).parent / "demo_dispu
 TIMES = ("create_time", "update_time", "seller_response_due_date")  # the dispute's hour offsets
 NUMBER = re.compile(r"[A-Z0-9-]{4,40}")  # a tracking number
 CARRIER_NAME = re.compile(r"[A-Za-z0-9 .&'-]{1,40}")
-# sim_carrier's scans: Vendor Guard's own fictional format, as PayPal has no carrier delivery events
+# sim_carrier's scans: GoodToShip's own fictional format, as PayPal has no carrier delivery events
 EVENTS = {"PICKED_UP": "picked up", "IN_TRANSIT": "in transit", "DELIVERED": "delivered",
           "RETURNED": "returned to sender"}
 # a SNAD buyer's codes, read from PayPal's Disputes v1 spec (paypal-rest-api-specifications,
@@ -87,11 +87,11 @@ NO_ASKS_HERE = "PayPal hasn't listed what it asks for yet."  # never "check your
 PAGES = "PayPal's pages for this list:"
 GROUPS = {"ready": "Ready (✓): what you can send now",
           "missing": "Missing (✗): what's against you, or what you still need",
-          "check": "Check yourself (?): Vendor Guard can't see this"}
+          "check": "Check yourself (?): GoodToShip can't see this"}
 DRAFT_TO = {"buyer": "Draft message to the buyer, to paste in your Resolution Center:",
             "paypal": "Draft response to PayPal, to paste in your Resolution Center:"}
 MISSING = "Missing before you send this:"
-YOU_SEND = "You send it in PayPal: Vendor Guard doesn't."
+YOU_SEND = "You send it in PayPal: GoodToShip doesn't."
 ANYTHING_ELSE = "Anything else I can help with?"
 NO_DRAFT = {"card": "No draft for a card case.", "resolved": "No draft: this dispute is resolved.",
             "stage": "No draft for an appeal.", "other": "No draft for this reason yet."}
@@ -510,7 +510,7 @@ def _snad_lines(state, base: list[dict]) -> list[dict]:
         lines.append(_ln("listing", YES, f"Your listing's description ({listing['name']}, {listing['price']}): "
                                          f"\"{listing['description']}\""))
     else:
-        lines.append(_ln("listing", UNKNOWN, "Your listing's description: Vendor Guard has no listing for this sale"))
+        lines.append(_ln("listing", UNKNOWN, "Your listing's description: GoodToShip has no listing for this sale"))
     back = state["shipments"]["return"]
     home = next((e for e in state["carrier"].get(back["number"], []) if e["event"] == "DELIVERED"), None) if back else None
     if home:

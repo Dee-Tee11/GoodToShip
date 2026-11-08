@@ -97,9 +97,9 @@ def test_a_handoff_takes_messages_and_answers_until_it_is_closed():
         db.add_handoff(sid, [{"who": "seller", "text": "again"}], None)
     (first,) = db.demo_state(sid)["handoffs"]
     assert db.relay(sid, {"who": "seller", "text": "still there?"})
-    assert db.answer_handoff(first["id"], "Hi, Ana from Vendor Guard here.") and db.answer_handoff(first["id"], "Yes.")
+    assert db.answer_handoff(first["id"], "Hi, Ana from GoodToShip here.") and db.answer_handoff(first["id"], "Yes.")
     (listed,) = [h for h in db.open_handoffs() if h["id"] == first["id"]]
-    assert [t["text"] for t in listed["transcript"]] == ["operator", "still there?", "Hi, Ana from Vendor Guard here.", "Yes."]
+    assert [t["text"] for t in listed["transcript"]] == ["operator", "still there?", "Hi, Ana from GoodToShip here.", "Yes."]
     assert "session_id" not in listed and listed["updated_at"] > listed["shared_at"]
     assert db.open_handoff_session(first["id"]) == sid and db.handoff_open(sid)
     assert not db.close_handoff(sid, first["id"] + 1)  # the person's Close: only the card they clicked
@@ -110,7 +110,7 @@ def test_a_handoff_takes_messages_and_answers_until_it_is_closed():
         assert c.execute("SELECT transcript, last_case FROM handoffs WHERE id = %s", (first["id"],)).fetchone() == ([], None)
     db.add_handoff(sid, [{"who": "seller", "text": "a new one"}], None)  # after closing: a new one
     assert [(h["status"], h["replies"]) for h in db.demo_state(sid)["handoffs"]] == [
-        ("closed", ["Hi, Ana from Vendor Guard here.", "Yes."]), ("open", [])]
+        ("closed", ["Hi, Ana from GoodToShip here.", "Yes."]), ("open", [])]
     db.end_demo_sessions(sid)
 
 

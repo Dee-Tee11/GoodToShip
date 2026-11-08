@@ -161,7 +161,7 @@ def test_u22_ungrounded_answers_fail(keys, text, sources, rule):
 
 def test_u22_ship_and_verdicts_only_from_the_last_checks_note():
     text = "VERIFIED: You can ship."
-    assert answer(["vg_verdicts"], text, [2])  # Vendor Guard's verdicts in general: no check
+    assert answer(["vg_verdicts"], text, [2])  # GoodToShip's verdicts in general: no check
     assert answer(["vg_verified"], "You saw: You can ship.", [1], case_note="vg_verified") == []
 
 

@@ -16,7 +16,7 @@ import pytest
 from app import chat, policy_pack
 
 UA = "Mozilla/5.0 (X11; Linux x86_64; rv:131.0) Gecko/20100101 Firefox/131.0"
-PARTIAL = "This is not PayPal's full list"  # policy_pack._partial: Vendor Guard's words, not on the page
+PARTIAL = "This is not PayPal's full list"  # policy_pack._partial: GoodToShip's words, not on the page
 KEYS = [key for key in policy_pack.POLICY_PACK if key.startswith("pp_")]
 
 
@@ -74,7 +74,7 @@ def pattern(sentence: str) -> re.Pattern:
 
 
 def found(sentence: str, text: str) -> bool:
-    """Each part of the sentence, split where Vendor Guard joined a lead-in and its items (": ", "; "), on the page
+    """Each part of the sentence, split where GoodToShip joined a lead-in and its items (": ", "; "), on the page
     in order. Items the note skips may sit between them: whether a note says it quotes only part is policy_pack's."""
     pos = 0
     for part in re.split(r"[:;]\s", sentence):

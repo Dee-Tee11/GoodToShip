@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Vendor Guard sandbox demo</title>
+<title>GoodToShip sandbox demo</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Public+Sans:wght@400;500;700;800&display=swap" rel="stylesheet">
@@ -181,11 +181,11 @@
 <div id="app" data-menu="check">
   <div class="top">
     <div>
-      <h1>Vendor Guard sandbox demo</h1>
-      <p>Check a buyer: sell something, pay for it as a test buyer, then ask Vendor Guard whether to ship. Practice disputes: draft a response to a fictional dispute, with no PayPal call. Every PayPal call and every step of the check appears on the right as it happens. It all runs in PayPal's sandbox, with no real money.</p>
+      <h1>GoodToShip sandbox demo</h1>
+      <p>Check a buyer: sell something, pay for it as a test buyer, then ask GoodToShip whether to ship. Practice disputes: draft a response to a fictional dispute, with no PayPal call. Every PayPal call and every step of the check appears on the right as it happens. It all runs in PayPal's sandbox, with no real money.</p>
     </div>
     <div class="session">
-      This session is yours alone. Ending it, or closing this tab, deletes your sales and checks from Vendor Guard. PayPal's sandbox keeps its own record of the payments.
+      This session is yours alone. Ending it, or closing this tab, deletes your sales and checks from GoodToShip. PayPal's sandbox keeps its own record of the payments.
       <div><button class="btn quiet" id="end" type="button">End demo and delete my data</button></div>
     </div>
   </div>
@@ -227,24 +227,24 @@
 
       <section class="step for-practice" aria-labelledby="s-practice">
         <h2 id="s-practice">Practice disputes</h2>
-        <p>Each scenario is a made-up dispute on a made-up sale. Press Get my draft: its ID goes to the chat, and Vendor Guard answers with a checklist and a draft response to paste in the Resolution Center.</p>
+        <p>Each scenario is a made-up dispute on a made-up sale. Press Get my draft: its ID goes to the chat, and GoodToShip answers with a checklist and a draft response to paste in the Resolution Center.</p>
         <ol class="orders" id="practice"></ol>
         <p class="note" id="practice-note" role="status"></p>
       </section>
 
       <section class="step for-practice" aria-labelledby="s-checklist">
         <h2 id="s-checklist">Your checklist</h2>
-        <p>The last scenario's checklist, as Vendor Guard wrote it in the chat.</p>
+        <p>The last scenario's checklist, as GoodToShip wrote it in the chat.</p>
         <p class="empty" id="no-checklist">Pick a scenario above: its checklist appears here.</p>
         <div class="checklist" id="checklist"></div>
       </section>
 
       <section class="step" id="operator" aria-labelledby="s5" hidden>
         <h2 id="s5">Talk to a person</h2>
-        <p>Stuck, or want a second opinion? Ask in the chat for a person from Vendor Guard, or say operator. Nothing is shared until you say yes; then a person reads your conversation and answers you in the chat. Press Stop sharing to end it.</p>
+        <p>Stuck, or want a second opinion? Ask in the chat for a person from GoodToShip, or say operator. Nothing is shared until you say yes; then a person reads your conversation and answers you in the chat. Press Stop sharing to end it.</p>
         <button class="btn quiet" id="ask-person" type="button">Ask for a person</button>
         <details class="team">
-          <summary>For Vendor Guard's team: answer shared chats</summary>
+          <summary>For GoodToShip's team: answer shared chats</summary>
           <p class="caveat">The conversations sellers chose to share, from every demo session, each with an answer box. Paste the operator token to see them. It stays in this tab's memory only.</p>
           <form class="ask" id="op-login">
             <label class="sr-only" for="op-token">Operator token</label>
@@ -258,7 +258,7 @@
     </div>
 
     <section class="step chat" aria-labelledby="s3">
-      <h2 id="s3"><span class="n for-check">3</span> Ask Vendor Guard</h2>
+      <h2 id="s3"><span class="n for-check">3</span> Ask GoodToShip</h2>
       <p class="for-check">Questions about selling with PayPal, answered from notes checked against PayPal's own pages. To check a payment, pick a buyer's chat or type check.</p>
       <p class="for-practice">Pick a scenario on the left, or paste its ID (it starts with PP-SIM-). The same chat as in Check a buyer.</p>
       <p class="chips-label">Try asking</p>
@@ -267,7 +267,7 @@
       <p class="chips-label for-check" id="scenarios-label">Check a buyer's chat</p>
       <div class="chips for-check" id="scenarios" role="group" aria-labelledby="scenarios-label"></div>
       <ol class="talk" id="talk" aria-live="polite"></ol>
-      <p class="note" id="with-person" hidden>A person from Vendor Guard has this conversation: your messages go to them, and Vendor Guard doesn't answer. <button class="btn quiet" id="stop-sharing" type="button">Stop sharing</button></p>
+      <p class="note" id="with-person" hidden>A person from GoodToShip has this conversation: your messages go to them, and GoodToShip doesn't answer. <button class="btn quiet" id="stop-sharing" type="button">Stop sharing</button></p>
       <form class="ask" id="ask">
         <label class="sr-only" for="message">Your message</label>
         <textarea id="message" maxlength="8000" placeholder="Ask a question, or type check"></textarea>
@@ -280,7 +280,7 @@
 
     <aside class="trace" aria-labelledby="t">
       <header>
-        <h2 id="t">What Vendor Guard is doing</h2>
+        <h2 id="t">What GoodToShip is doing</h2>
         <p class="for-check">The steps of the check light up as they run. Open any line to see exactly what PayPal or the model returned.</p>
         <p class="for-practice">The steps of the draft light up as they run: a file and code, with no PayPal call and no model. Open any line to see what each step read or wrote.</p>
       </header>
@@ -369,7 +369,7 @@ async function api(path, body) {
 
 function sessionEnded() {
   store(null);
-  showEnded("Your demo session ended", "It went 30 minutes without activity, so Vendor Guard deleted your sales and checks.");
+  showEnded("Your demo session ended", "It went 30 minutes without activity, so GoodToShip deleted your sales and checks.");
 }
 
 function showEnded(title, text) {
@@ -481,7 +481,7 @@ async function refresh() {
     seenEvents.add(e.id);
     log("Webhook", "webhook", `${e.event_type}, signature verified by PayPal. ${e.summary || ""}`, e);
   }
-  // a person's answers, then the notice that the chat started over: each once, apart from Vendor Guard's replies.
+  // a person's answers, then the notice that the chat started over: each once, apart from GoodToShip's replies.
   // Only for a handoff this page saw open: after a reload, the closed ones are an earlier chat's
   for (const h of state.handoffs) {
     if (h.status === "open") seenOpen.add(h.id);
@@ -490,13 +490,13 @@ async function refresh() {
       if (seenReplies.has(`${h.id}:${i}`)) return;
       seenReplies.add(`${h.id}:${i}`);
       bubble("op", `Operator: ${reply}`);
-      log("Operator", "operator", "A person from Vendor Guard answered.", reply);
+      log("Operator", "operator", "A person from GoodToShip answered.", reply);
     });
     if (h.notice && !seenReplies.has(`${h.id}:closed`)) {
       seenReplies.add(`${h.id}:closed`);
       awaiting = null;
       bubble("vg", h.notice);
-      log("Operator", "operator", "The shared conversation closed: Vendor Guard forgot this chat and started over.");
+      log("Operator", "operator", "The shared conversation closed: GoodToShip forgot this chat and started over.");
     }
   }
   $("with-person").hidden = !state.handoffs.some((h) => h.status === "open");
@@ -508,7 +508,7 @@ async function refresh() {
 function receipt(s, who) {
   const buyer = who === "buyer";
   const lines = [
-    [`Vendor Guard sandbox demo: ${buyer ? "payment receipt (buyer's copy)" : "payment received (seller's copy)"}`,
+    [`GoodToShip sandbox demo: ${buyer ? "payment receipt (buyer's copy)" : "payment received (seller's copy)"}`,
       "bold 24px sans-serif"],
     ["Sandbox test payment, no real money", "16px sans-serif"],
     ["", ""],
@@ -584,7 +584,7 @@ function askDispute(id, noteId) {
   note(noteId, "");
   if (awaiting === "consent") return note(noteId, "Answer the question about sharing first: yes, or anything else to keep it to yourself.", true);
   if (awaiting) return note(noteId, "A check is waiting in the chat: finish it, or type cancel first.", true);
-  if (!$("with-person").hidden) return note(noteId, "A person from Vendor Guard has this conversation. To ask Vendor Guard, press Stop sharing.", true);
+  if (!$("with-person").hidden) return note(noteId, "A person from GoodToShip has this conversation. To ask GoodToShip, press Stop sharing.", true);
   send(id, false);
 }
 
@@ -647,7 +647,7 @@ async function prepare(key) {
   if (sending) return;
   // "check" would answer the question, or go to the person
   if (awaiting === "consent") return note("ask-note", "Answer the question about sharing first: yes, or anything else to keep it to yourself.", true);
-  if (!$("with-person").hidden) return note("ask-note", "A person from Vendor Guard has this conversation. To check a buyer's chat with Vendor Guard, press Stop sharing.", true);
+  if (!$("with-person").hidden) return note("ask-note", "A person from GoodToShip has this conversation. To check a buyer's chat with GoodToShip, press Stop sharing.", true);
   // the price would run the check on that screenshot or payment ID, not on this chat
   if (awaiting === "price" && held) return note("ask-note", "Your screenshot or payment ID is waiting for its price: send the price, or type cancel first.", true);
   const scenario = SCENARIOS[key];
@@ -807,7 +807,7 @@ async function send(message, typed = true) {
     });
     if (!r) throw new Error(error || "The answer didn't arrive. Send your message again.");  // a cut stream too
     if (r.type === "relayed") {
-      log("Chat", "operator", "sent your message to the person from Vendor Guard. No model call: Vendor Guard doesn't answer while they have the conversation.", r);
+      log("Chat", "operator", "sent your message to the person from GoodToShip. No model call: GoodToShip doesn't answer while they have the conversation.", r);
       return r;
     }
     if (r.route === "handoff") refresh();  // a yes opened one: seen open now, not at the next poll
@@ -836,14 +836,14 @@ async function send(message, typed = true) {
   }
 }
 
-// ---- the operator: a person from Vendor Guard answers what sellers shared, from every session ----
+// ---- the operator: a person from GoodToShip answers what sellers shared, from every session ----
 let operatorToken = "";  // this tab's memory only, sent in a header and never in a URL: a reload asks for it again
 const cards = new Map();  // handoff id -> updated_at on screen: the polling redraws only a changed conversation
 let polled = "";  // the note the poll wrote last, taken back by a later poll if nothing wrote over it
 const seenOpen = new Set();  // the seller's handoffs this page saw open
 const seenReplies = new Set();  // "id:n" operator answers and "id:closed" notices already in this page's chat
 const IMAGE = /^data:image\/(png|jpeg);base64,[A-Za-z0-9+/=]+$/;  // what the server stores; anything else isn't shown
-const WHO = {seller: "Seller", vendor_guard: "Vendor Guard", operator: "Operator"};
+const WHO = {seller: "Seller", goodtoship: "GoodToShip", operator: "Operator"};
 
 async function operatorApi(path, body) {  // not api(): a 401 here is a wrong token, not an ended session
   const token = operatorToken;
@@ -877,7 +877,7 @@ function card(h) {
   const answer = el("textarea", {maxlength: "2000", placeholder: "Your answer to the seller", "aria-label": "Your answer to the seller"});
   const send = el("button", {class: "btn", type: "submit"}, "Answer");
   const close = el("button", {class: "btn quiet", type: "button", onclick: async () => {
-    if (!confirm("Close this conversation? What you see here is deleted, and the seller's chat with Vendor Guard starts over.")) return;
+    if (!confirm("Close this conversation? What you see here is deleted, and the seller's chat with GoodToShip starts over.")) return;
     try {
       await operatorApi(`/demo/api/operator/handoffs/${h.id}/close`, {});
       item.remove();
@@ -971,7 +971,7 @@ $("message").addEventListener("keydown", (e) => {
   if (e.key === "Enter" && !e.shiftKey && !e.isComposing) { e.preventDefault(); send($("message").value); }
 });
 $("stop-sharing").addEventListener("click", async () => {
-  if (!confirm("Stop sharing? Vendor Guard's team no longer sees this chat, and Vendor Guard forgets it and starts again.")) return;
+  if (!confirm("Stop sharing? GoodToShip's team no longer sees this chat, and GoodToShip forgets it and starts again.")) return;
   try { await api("/demo/api/handoff/close", {}); } catch (e) { if (!(e instanceof Ended)) note("ask-note", e.message, true); return; }
   refresh();
 });
@@ -991,10 +991,10 @@ function showMenu() {
 window.addEventListener("hashchange", showMenu);
 showMenu();
 $("end").addEventListener("click", async () => {
-  if (!confirm("End the demo and delete your sales and checks from Vendor Guard?")) return;
+  if (!confirm("End the demo and delete your sales and checks from GoodToShip?")) return;
   try { await api("/demo/api/end", {}); } catch (e) { if (!(e instanceof Ended)) alert(e.message); return; }
   store(null);
-  showEnded("Demo ended", "Your sales and checks were deleted from Vendor Guard.");
+  showEnded("Demo ended", "Your sales and checks were deleted from GoodToShip.");
 });
 start();
 </script>

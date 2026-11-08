@@ -1,7 +1,7 @@
 """Notes the chat shows word for word, looked up by key, never by similarity.
 
 An entry is shown, or offered to the LLM, only when verified is True: a person has read its source page (test U16).
-PayPal texts repeat their page; the only edit is "we/our" -> "PayPal", so they don't read as Vendor Guard speaking.
+PayPal texts repeat their page; the only edit is "we/our" -> "PayPal", so they don't read as GoodToShip speaking.
 """
 from app.scam_check import (
     CONTACT_PAYPAL, MONEY_OUT, MONEY_OUT_WARNING, POLICY, SHIP, SIGNAL_STEPS, SIGNALS, STEPS, SUPPORT,
@@ -15,7 +15,7 @@ SCAMS = PAYPAL_PAGES + "cshelp/article/what-are-common-scams-and-how-do-i-spot-t
 
 
 def _vg(title: str, text: str, anchor: str) -> dict:
-    """Vendor Guard's own notes, built from scam_check's texts so they can't drift."""
+    """GoodToShip's own notes, built from scam_check's texts so they can't drift."""
     return {"title": title, "text": text, "source_url": f"README.md#{anchor}", "retrieved_at": "2026-10-22", "verified": True}
 
 
@@ -26,7 +26,7 @@ def _pp(title: str, text: str, url: str, retrieved_at: str = "2026-10-22") -> di
 
 
 def _partial(url: str) -> str:
-    """For a note that quotes only part of PayPal's list of requirements: Vendor Guard's words, not PayPal's."""
+    """For a note that quotes only part of PayPal's list of requirements: GoodToShip's words, not PayPal's."""
     return f" This is not PayPal's full list: check every requirement on PayPal's page: {url}"
 
 
@@ -52,16 +52,16 @@ def _warning_sign(signal: str) -> dict:
 
 POLICY_PACK = {
     "vg_verdicts": _vg(
-        "Vendor Guard's verdicts",
-        "Vendor Guard checks the payment in PayPal and gives one of four verdicts. "
+        "GoodToShip's verdicts",
+        "GoodToShip checks the payment in PayPal and gives one of four verdicts. "
         f"VERIFIED: {POLICY['P.VERIFIED']} VERIFIED_WITH_WARNINGS: {POLICY['P.VERIFIED_WARN']} "
         f"WAIT: the payment is not confirmed yet. SCAM_LIKELY: {POLICY['P.SCAM_LIKELY']} "
         f"When the chat asks you to send money, pay a fee or follow a payment link, the answer also says: {MONEY_OUT_WARNING}",
         "graph-1-scam_check",
     ),
     "vg_why_wait": _vg(
-        "Why Vendor Guard says WAIT",
-        "WAIT means Vendor Guard could not confirm a completed payment of your price, so don't ship yet. "
+        "Why GoodToShip says WAIT",
+        "WAIT means GoodToShip could not confirm a completed payment of your price, so don't ship yet. "
         "The sentence under WAIT says which of these happened:\n"
         + "\n".join(f"{label}: {shown}" for pid, (label, shown, _) in STEPS.items() if pid.startswith("P.WAIT"))
         + "\nAsk me what to do about yours, for example: the amount paid is not my price, what do I do?",
@@ -214,7 +214,7 @@ POLICY_PACK = {
         "closed automatically after 20 days unless you or the buyer escalate it.",
         PAYPAL_PAGES + "cshelp/article/i-am-a-seller---how-do-i-handle-a-dispute-or-problem-with-a-buyer-help1083",
     ),
-    # added 2026-10-30, verified by the user the same day. The list is shown as "- " bullets, one per line (Vendor Guard's
+    # added 2026-10-30, verified by the user the same day. The list is shown as "- " bullets, one per line (GoodToShip's
     # punctuation, not PayPal's words)
     "pp_respond_to_dispute": _pp(
         "How to respond to a dispute, and what to send",

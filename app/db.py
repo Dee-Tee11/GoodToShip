@@ -39,7 +39,7 @@ SCHEMA = (
     """CREATE TABLE IF NOT EXISTS demo_cases (
     case_id text PRIMARY KEY,
     session_id text NOT NULL REFERENCES demo_sessions ON DELETE CASCADE)""",
-    # a session's conversation, shared with a person from Vendor Guard after the seller's yes (app/chat.py handoff),
+    # a session's conversation, shared with a person from GoodToShip after the seller's yes (app/chat.py handoff),
     # theirs until the seller or they close it. replies: the person's answers, for the seller's page
     """CREATE TABLE IF NOT EXISTS handoffs (
     id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,

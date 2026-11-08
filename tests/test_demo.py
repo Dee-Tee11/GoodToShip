@@ -366,25 +366,25 @@ def test_d20_only_a_yes_hands_the_whole_conversation_over(demo_db, choice, llm_s
     assert row["last_case"] == {"case_id": "c1", "policy_id": "P.WAIT_NOT_CONFIRMED", "signals": []}
     assert row["transcript"] == [
         {"who": "seller", "text": "Can I sell gift cards?"},
-        {"who": "vendor_guard", "text": f"{chat.DONT_KNOW}\n\n{chat.OFFER_OPERATOR}"},
+        {"who": "goodtoship", "text": f"{chat.DONT_KNOW}\n\n{chat.OFFER_OPERATOR}"},
         {"who": "seller", "text": "", "image": f"data:image/png;base64,{png}"},
-        {"who": "vendor_guard", "text": held_reply(chat.READ_NO_ID)},
+        {"who": "goodtoship", "text": held_reply(chat.READ_NO_ID)},
         {"who": "seller", "text": "45.00 USD"},
-        {"who": "vendor_guard", "text": chat.card(FAKE, True)},
+        {"who": "goodtoship", "text": chat.card(FAKE, True)},
         {"who": "seller", "text": "check"},
-        {"who": "vendor_guard", "text": chat.ASK_PRICE},
+        {"who": "goodtoship", "text": chat.ASK_PRICE},
         {"who": "seller", "text": "45.00 USD"},
-        {"who": "vendor_guard", "text": chat.ASK_CHAT},
+        {"who": "goodtoship", "text": chat.ASK_CHAT},
         {"who": "seller", "text": "Buyer: paid", "image": f"data:image/png;base64,{png}"},
-        {"who": "vendor_guard", "text": chat.card(FAKE, True)},
+        {"who": "goodtoship", "text": chat.card(FAKE, True)},
         {"who": "seller", "text": "operator"},
-        {"who": "vendor_guard", "text": chat.ASK_CONSENT},
+        {"who": "goodtoship", "text": chat.ASK_CONSENT},
         {"who": "seller", "text": "no"},
-        {"who": "vendor_guard", "text": chat.NOT_SHARED},
+        {"who": "goodtoship", "text": chat.NOT_SHARED},
         {"who": "seller", "text": "operator"},
-        {"who": "vendor_guard", "text": chat.ASK_CONSENT},
+        {"who": "goodtoship", "text": chat.ASK_CONSENT},
         {"who": "seller", "text": "yes"},
-        {"who": "vendor_guard", "text": chat.SHARED},
+        {"who": "goodtoship", "text": chat.SHARED},
     ]
 
 
@@ -410,7 +410,7 @@ def test_d22_a_handoff_the_database_refuses_leaves_no_sent_behind(demo_db, choic
 
     monkeypatch.setattr(db, "add_handoff", refuse)
     assert lines(say(h, "yes")) == [{"type": "error", "message": "the message could not be answered, try again"}]
-    assert demo._transcripts[h["X-Demo-Session"]][-1] == {"who": "vendor_guard", "text": chat.ASK_CONSENT}
+    assert demo._transcripts[h["X-Demo-Session"]][-1] == {"who": "goodtoship", "text": chat.ASK_CONSENT}
     assert not demo._busy and said(h, "operator")["reply"] == chat.ASK_CONSENT  # asked again
 
 
@@ -442,13 +442,13 @@ def test_d25_a_persons_answers_reach_the_seller_but_never_the_graph(demo_db, cho
     say(h, "operator")
     say(h, "yes")
     (shared,) = client.get("/demo/api/operator/handoffs", headers=op).json()
-    assert "session_id" not in shared and shared["transcript"][-1] == {"who": "vendor_guard", "text": chat.SHARED}
+    assert "session_id" not in shared and shared["transcript"][-1] == {"who": "goodtoship", "text": chat.SHARED}
     url = f"/demo/api/operator/handoffs/{shared['id']}/reply"
     assert client.post(url, json={"reply": "x" * 2001}, headers=op).status_code == 422
     for bad in (0, 2**63):  # out of bigint's range: a 422, never psycopg's 500
         for path, body in (("reply", {"reply": "Hi"}), ("close", None)):
             assert client.post(f"/demo/api/operator/handoffs/{bad}/{path}", json=body, headers=op).status_code == 422
-    answers = ["Hi, Ana from Vendor Guard. Don't ship until PayPal shows the payment as Completed.", "Anything else?"]
+    answers = ["Hi, Ana from GoodToShip. Don't ship until PayPal shows the payment as Completed.", "Anything else?"]
     for answer in answers:  # as many as they like: the conversation stays open
         assert client.post(url, json={"reply": answer}, headers=op).json() == {"answered": True}
     assert lines(say(h, "No, thanks Ana")) == [{"type": "relayed"}]
@@ -492,7 +492,7 @@ def test_d28_ten_wrong_operator_tokens_lock_the_address_out(demo_db, monkeypatch
     assert r.status_code == 429 and "wrong tokens" in r.json()["detail"]
 
 
-def test_d29_vendor_guard_speaks_first(demo_db, choice, monkeypatch):
+def test_d29_goodtoship_speaks_first(demo_db, choice, monkeypatch):
     s = client.post("/demo/api/session").json()
     assert s["intro"] == chat.intro(False)  # no OPERATOR_TOKEN: no person is offered
     assert demo.chat_graph.get_state(demo._thread(s["session_id"])).values["greeted"] is True
@@ -504,7 +504,7 @@ def test_d29_vendor_guard_speaks_first(demo_db, choice, monkeypatch):
     assert s["session_id"] not in demo._transcripts  # fixed text, nothing of the seller's: never shared
 
 
-def test_d30_while_a_person_has_the_conversation_vendor_guard_never_answers(demo_db, choice, monkeypatch):
+def test_d30_while_a_person_has_the_conversation_goodtoship_never_answers(demo_db, choice, monkeypatch):
     monkeypatch.setattr(demo, "OPERATOR_TOKEN", TOKEN)
     monkeypatch.setattr(scam_check, "run", lambda *args: pytest.fail("no check while a person has it"))
     h = start()
@@ -552,8 +552,8 @@ def test_d31_closing_deletes_what_the_person_saw_and_starts_the_chat_over(demo_d
     assert sid not in demo._transcripts and demo.chat_graph.get_state(demo._thread(sid)).values == {
         "messages": [], "greeted": True}  # as a new session's
     choice.intent = "other"
-    assert said(h, "Hi")["reply"] == chat.SCOPE  # Vendor Guard answers again; greeted, by the notice
-    assert demo._transcripts[sid] == [{"who": "seller", "text": "Hi"}, {"who": "vendor_guard", "text": chat.SCOPE}]
+    assert said(h, "Hi")["reply"] == chat.SCOPE  # GoodToShip answers again; greeted, by the notice
+    assert demo._transcripts[sid] == [{"who": "seller", "text": "Hi"}, {"who": "goodtoship", "text": chat.SCOPE}]
 
 
 @pytest.mark.parametrize("cut", ["the page goes away", "storing the case fails"])
@@ -574,9 +574,9 @@ def test_d32_a_check_cut_short_is_still_saved_in_the_chat(api, llm_stub, demo_db
         monkeypatch.setattr(db, "add_demo_case", lambda *args: 1 / 0)
         assert lines(say(h, PAID))[-1] == {"type": "error", "message": "the message could not be answered, try again"}
     values = demo.chat_graph.get_state(demo._thread(sid)).values
-    assert not demo._busy and values["awaiting"] is None and values["last_case"]["policy_id"] == "P.VERIFIED"
+    assert not demo._busy and values["awaiting"] is None and values["cases"][-1]["policy_id"] == "P.VERIFIED"
     if cut == "the page goes away":
-        assert demo_db[sid]["cases"] == [values["last_case"]["case_id"]]  # so ending the session deletes it
+        assert demo_db[sid]["cases"] == [values["cases"][-1]["case_id"]]  # so ending the session deletes it
 
 
 def test_d33_the_persons_close_closes_only_the_card_they_clicked(demo_db, choice, monkeypatch):
@@ -659,7 +659,7 @@ def test_d36_mark_as_shipped_adds_test_tracking_once_to_a_paid_sale_of_the_sessi
     assert ship(h).json() == {"tracking": "VG-DEMO-ORDER1"}
     assert json.loads(track.calls[0].request.content) == {  # the capture id from the database: the request has no body
         "capture_id": TID, "tracking_number": "VG-DEMO-ORDER1", "carrier": "OTHER",
-        "carrier_name_other": "Vendor Guard demo", "notify_payer": False}
+        "carrier_name_other": "GoodToShip demo", "notify_payer": False}
     assert track.calls[0].request.headers["PayPal-Request-Id"] == "track-ORDER1"
     assert ship(h).status_code == 409 and track.call_count == 1  # a second click: never a second tracker
     assert [s["tracking"] for s in client.get("/demo/api/state", headers=h).json()["sales"]] == ["VG-DEMO-ORDER1", None]

@@ -2,7 +2,7 @@ import json, re, sys
 exec(open(sys.argv[1]).read().split("NOTES = ")[0])
 from app import chat
 NOTES = [(k, s, words(s)) for k, s in chat._listed(list(chat.VERIFIED))]
-META = re.compile(r"Vendor Guard (may|must|never|can't|explains|doesn't)|Vendor Guard can check|say check")
+META = re.compile(r"GoodToShip (may|must|never|can't|explains|doesn't)|GoodToShip can check|say check")
 def cov(ws, o): return len(ws & o) / len(ws) if ws else 1.0
 for path in sys.argv[2:]:
     for r in map(json.loads, open(path)):

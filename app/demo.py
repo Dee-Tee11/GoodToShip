@@ -1,7 +1,7 @@
 """The live demo: a tester makes a sale, pays it in PayPal's sandbox checkout with a shared buyer account, then asks
 the chat graph (main.demo_chat), one conversation per session, to check the buyer's chat, and watches every node and
-PayPal call of the check as it runs. With their yes, the seller can hand the conversation to a person from Vendor Guard
-(the handoffs table): the seller's messages then go to that person and Vendor Guard doesn't answer, until the seller or
+PayPal call of the check as it runs. With their yes, the seller can hand the conversation to a person from GoodToShip
+(the handoffs table): the seller's messages then go to that person and GoodToShip doesn't answer, until the seller or
 the person closes it. Closing deletes what the person saw and starts the chat over, as a new session's.
 
 On only with DEMO_MODE=true, and only against PayPal's sandbox (main.lifespan refuses to start otherwise). Creating and
@@ -76,7 +76,7 @@ def busy(session_id: str, taken: str = "your last message is still running, wait
 
 
 def operator(request: Request, x_operator_token: str = Header("", max_length=256)) -> None:
-    """A person from Vendor Guard: the shared OPERATOR_TOKEN, in a header only, never in a URL. 404 when it isn't set,
+    """A person from GoodToShip: the shared OPERATOR_TOKEN, in a header only, never in a URL. 404 when it isn't set,
     401 for a wrong one, before any database call; an address at its limit of wrong ones is a 429, the right one too."""
     if not OPERATOR_TOKEN:
         raise HTTPException(404)
@@ -194,7 +194,7 @@ def ship_order(order_id: str, request: Request, session_id: str = Depends(sessio
         r = paypal._call("POST", f"/v2/checkout/orders/{order_id}/track",
                          headers={"PayPal-Request-Id": f"track-{order_id}"},
                          json={"capture_id": capture_id, "tracking_number": tracking, "carrier": "OTHER",
-                               "carrier_name_other": "Vendor Guard demo", "notify_payer": False})
+                               "carrier_name_other": "GoodToShip demo", "notify_payer": False})
         if r.is_error:
             raise _paypal_error(r, "tracking")
     except Exception as e:  # refused, or no answer (which may still have added it): unmarked, so a click can try again
@@ -269,7 +269,7 @@ def seller_close(session_id: str = Depends(turn, scope="function")):
 
 
 def _close(session_id: str, handoff_id: int | None = None) -> None:
-    """The open handoff closed and the chat started over: the thread and the transcript go, so Vendor Guard forgets
+    """The open handoff closed and the chat started over: the thread and the transcript go, so GoodToShip forgets
     everything before, and greets again (state's notice). Inside busy()."""
     if not db.close_handoff(session_id, handoff_id):
         raise HTTPException(409, GONE)
@@ -278,7 +278,7 @@ def _close(session_id: str, handoff_id: int | None = None) -> None:
 
 
 def _greet(session_id: str) -> None:
-    """Vendor Guard speaks first: the page shows the intro, so the thread is greeted and a "Hi" gets the one-line
+    """GoodToShip speaks first: the page shows the intro, so the thread is greeted and a "Hi" gets the one-line
     reply."""
     chat_graph.update_state(_thread(session_id), {"greeted": True}, as_node="other")
 
@@ -332,14 +332,14 @@ def chat_turn(session_id: str, message: str, image: bytes | None, checks: list[s
     empty)."""
     nodes, state = {}, {}
     url = None if image is None else chat.data_url(image)
-    # sanitized, as the check and classify read it: the operator sees what Vendor Guard saw ("price < 40" as
+    # sanitized, as the check and classify read it: the operator sees what GoodToShip saw ("price < 40" as
     # "price 40"), so a reply that went wrong on the cleaned text can be traced to it
     said = {"who": "seller", "text": scam_check.sanitize(message)}
     if url and "screenshot" in checks:  # read in this turn: held for the price, or by the check
         said["image"] = url
     elif url:  # never read: dropped at the consent step, or by cancel
         said["text"] = f"{said['text']}\n[screenshot, not read]".strip()
-    if OPERATOR_TOKEN and db.relay(session_id, said):  # a database error fails closed: Vendor Guard doesn't answer either
+    if OPERATOR_TOKEN and db.relay(session_id, said):  # a database error fails closed: GoodToShip doesn't answer either
         yield {"type": "relayed"}
         return
     # the thread is in memory, the session in Postgres: after a restart (Render's sleep, a deploy, --reload) the page
@@ -380,9 +380,9 @@ def chat_turn(session_id: str, message: str, image: bytes | None, checks: list[s
         reply = f"{chat.RESTARTED}{'' if state.get('awaiting') else chat.RESTARTED_CHECK}\n\n{reply}"
     route =next(node for node in nodes if node != "classify")
     if OPERATOR_TOKEN:  # no operator page, no transcript: nobody would read it
-        pair = [said, {"who": "vendor_guard", "text": reply}]
+        pair = [said, {"who": "goodtoship", "text": reply}]
         if nodes.get("handoff", {}).get("consented"):  # the row holds everything so far, this turn too
-            db.add_handoff(session_id, [*_transcripts.get(session_id, []), *pair], state.get("last_case"))
+            db.add_handoff(session_id, [*_transcripts.get(session_id, []), *pair], (state.get("cases") or [None])[-1])
         _transcripts.setdefault(session_id, []).extend(pair)  # after the row: a refused one leaves no "Sent" behind
     classified = nodes.get("classify") or {}
     # held: screenshots or payment IDs wait for the price, so the page's scenario chips don't send one (demo.html)

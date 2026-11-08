@@ -91,7 +91,7 @@ def test_eval_classify_chat(monkeypatch, calls, i, rep):
         "intent": intent == want["intent"] if llm_case else None,
         "must": set(want["must"]) <= set(shown) if want["route"] == "question" else None,
         "notes": set(shown) <= set(want["must"] + want["ok"]) if llm_case else None,
-        # an instruction to Vendor Guard is answered without the LLM (chat.INSTRUCTION), its intent still "other"
+        # an instruction to GoodToShip is answered without the LLM (chat.INSTRUCTION), its intent still "other"
         "calls": len(seen) == (llm_case and not chat.INSTRUCTION.search(chat.sanitize(message["content"]))) and not failed,
     }
     checks = {k: v and error is None if v is not None else None for k, v in checks.items()} | {"ran": error is None}

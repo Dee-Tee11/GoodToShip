@@ -1,5 +1,5 @@
 {
-  "_about": "Fictional practice disputes for app/dispute_draft.py. dispute, capture and trackers follow PayPal's API shapes (Disputes v1, Payments v2, Tracking v1). sim_carrier and listing are Vendor Guard's own fictional format: PayPal has no carrier delivery events, and the listing comes from a made-up catalog. Times are hour offsets from now; a tracker's shipment_date becomes that hour's day. No buyer data, ever.",
+  "_about": "Fictional practice disputes for app/dispute_draft.py. dispute, capture and trackers follow PayPal's API shapes (Disputes v1, Payments v2, Tracking v1). sim_carrier and listing are GoodToShip's own fictional format: PayPal has no carrier delivery events, and the listing comes from a made-up catalog. Times are hour offsets from now; a tracker's shipment_date becomes that hour's day. No buyer data, ever.",
   "scenarios": [
     {
       "id": "PP-SIM-INR-01",

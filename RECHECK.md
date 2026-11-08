@@ -14,7 +14,7 @@ Added 2026-11-07, after the review fixes and the E07/E08 reruns judged by Claude
 
 - [ ] **52. The answer step falls back on every E08 follow-up.** [app/output_guardrails.py:136](app/output_guardrails.py#L136)
   4 of 4 on 2026-11-07 evening, 3 of 3 that morning. The rejections: "a permission not in its sources" (three times), "drops its sources' negation", "a verdict or shipping without the last check's note". The fallback quotes the 1 or 2 sentences `classify` picked, which reads as a truncated repeat: the judge's reason for `answers_last` at 6/10 (E08 3, 12, 13, 16).
-  The .txt shows only the rejecting rules' names. The rejected sentences are in LangSmith, project `vendorguard-evals` (EU), in each fallback's answer-step call: E08 3 turn 2 ("How do I protect myself then?"), 10 turn 2 ("What evidence should I send?"), 12 turn 2 ("Who decides the outcome?") and 15 turn 2 ("How do I refund them?").
+  The .txt shows only the rejecting rules' names. The rejected sentences are in LangSmith, project `goodtoship-evals` (EU), in each fallback's answer-step call: E08 3 turn 2 ("How do I protect myself then?"), 10 turn 2 ("What evidence should I send?"), 12 turn 2 ("Who decides the outcome?") and 15 turn 2 ("How do I refund them?").
   *To do:* read the rejected answers and decide whether the permission rule is too strict for these notes, or the prompt. Any change reruns C25, C39, U22 and E07 57 (the injection aimed at the answer step).
 
 - [ ] ~~**53. One judge sample per case.**~~ *Dropped by the user, 2026-11-08: not worth it, the evals keep changing with each iteration.* [tests/test_eval_seller.py](tests/test_eval_seller.py)
@@ -72,7 +72,7 @@ Added 2026-11-07, after the review fixes and the E07/E08 reruns judged by Claude
   *Fix:* before the chat gets an API endpoint, take the buyer's chat in a field that is not a message, or run the check on a thread with no checkpointer.
   *2026-10-25:* the chat now has a demo endpoint (`POST /demo/api/chat`). There the thread is in memory and deleted when the demo session ends or the service restarts, so nothing reaches disk. Still open for any endpoint outside the demo.
   *2026-10-27:* the thread also keeps `last_question`, the seller's last message that `classify` read (never the buyer's chat, which never reaches `classify`), and `last_case`, codes only.
-  *2026-10-30:* not fixed by the handoff, which adds to it. With `OPERATOR_TOKEN` set (since 2026-10-31, only then), the demo also keeps each session's whole conversation in memory, outside the graph (`demo._transcripts`), so a person from Vendor Guard can read it: the buyer's chat pasted at the chat step and the screenshots a check read included. Since 2026-10-31 the demo has no check panel: every check runs in the chat. With the seller's yes to `handoff`'s question, it is stored in Postgres (`handoffs`) until the session ends, then deleted with it.
+  *2026-10-30:* not fixed by the handoff, which adds to it. With `OPERATOR_TOKEN` set (since 2026-10-31, only then), the demo also keeps each session's whole conversation in memory, outside the graph (`demo._transcripts`), so a person from GoodToShip can read it: the buyer's chat pasted at the chat step and the screenshots a check read included. Since 2026-10-31 the demo has no check panel: every check runs in the chat. With the seller's yes to `handoff`'s question, it is stored in Postgres (`handoffs`) until the session ends, then deleted with it.
   *2026-11-01:* the thread also holds a screenshot sent before the price, in the `screenshot` field, until the price runs the check or the check ends (cancel, a question at the price step, `handoff`).
   *2026-11-03:* instead, up to 3 items in `held` until the price: a screenshot's text as the vision model copied it (the buyer's chat, at rest in the checkpointer as before, but never the image), and the IDs of short messages. Cleared in the same places.
   *2026-11-01, later:* on the demo, the thread now keeps only its latest state, without its messages (`demo._keep_latest`). A buyer's chat pasted at the chat step, or a screenshot a check read, leaves the thread when its turn ends, not when the session does. A screenshot held for the price stays in `screenshot` as before, and `_transcripts` is unchanged. Still open for Studio and `langgraph dev`.
@@ -127,7 +127,7 @@ Added 2026-11-07, after the review fixes and the E07/E08 reruns judged by Claude
   *To do:* read "already shipped" in the message itself, not only in the notes shown, and plan what a ship question that brings a new warning sign gets. A graph change: plan it first.
 
 - [ ] \* **37. A question at the chat step is checked as the buyer's chat.** [app/chat.py:485](app/chat.py#L485)
-  Added 2026-10-31, from E07 case 50, judged 2. "Wait, what does SCAM_LIKELY mean?", sent when Vendor Guard asked for the buyer's chat, ran `scam_check` and got a WAIT verdict with a case. The reference: no verdict, say no payment ID was found, ask for the chat again, and say cancel lets the seller ask.
+  Added 2026-10-31, from E07 case 50, judged 2. "Wait, what does SCAM_LIKELY mean?", sent when GoodToShip asked for the buyer's chat, ran `scam_check` and got a WAIT verdict with a case. The reference: no verdict, say no payment ID was found, ask for the chat again, and say cancel lets the seller ask.
   *To do:* decide in code what at the chat step is not a buyer's chat (no transaction ID, a question mark, no `Buyer:` label?). A buyer's chat with no ID is valid input today and gets WAIT, so this needs a plan first.
 
 - [ ] **38. `classify` picks notes that don't fit the message.** [app/chat.py:407](app/chat.py#L407)
@@ -141,7 +141,7 @@ Added 2026-11-07, after the review fixes and the E07/E08 reruns judged by Claude
 
 ## Disputes
 
-Vendor Guard practises disputes on fictional scenarios only (`dispute_draft`) since 2026-11-07: the points left out of the real-dispute graph went with it (CHANGES.md).
+GoodToShip practises disputes on fictional scenarios only (`dispute_draft`) since 2026-11-07: the points left out of the real-dispute graph went with it (CHANGES.md).
 
 - [ ] **46. "What now?" after a mistyped practice ID gets "Before you ship".** [app/chat.py](app/chat.py)
   Added 2026-11-06, from the review of `dispute_defense`; accepted for now by the user. A reply that leaves `shown` empty (a practice ID that doesn't exist, or a real dispute ID's fixed text) lets `advise` answer "what now?" from the last check's note, or with "Before you ship": shipping advice for a seller with an open dispute. A practice dispute leaves `pp_respond_to_dispute` in `shown` (a card case `pp_chargeback`), so it is fine. A reply with a dispute's note ends with the offer of a practice dispute and PayPal's line, once in a stretch of dispute replies (2026-11-08), so "what now?" right after a practice dispute no longer offers it again.

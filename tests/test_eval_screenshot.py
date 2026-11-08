@@ -41,11 +41,11 @@ def screenshot(*messages, blur=0) -> bytes:
 
 
 CHATS = {
-    "pt, overpayment": [
-        ("buyer", f"Olá! Já paguei pelo PayPal, o ID é {TID}."),
-        ("seller", "Obrigado, vou verificar."),
-        ("buyer", "Paguei a mais por engano, devolva-me a diferença por MB WAY."),
-        ("buyer", "Preciso que envie hoje sem falta!"),
+    "en, overpayment": [
+        ("buyer", f"Hi! I already paid with PayPal, the ID is {TID}."),
+        ("seller", "Thanks, I'll check."),
+        ("buyer", "I paid too much by mistake, send me the difference back by bank transfer."),
+        ("buyer", "I need you to ship today without fail!"),
     ],
     "en, own courier": [
         ("buyer", f"Hi, I paid for the camera. Transaction {TID}."),
@@ -74,7 +74,7 @@ def test_eval_screenshot_is_copied_word_for_word(messages):
 
 def test_eval_a_blurred_screenshot_is_not_guessed():
     """A guessed word would pass the quote check, so every word copied must be one the chat really has."""
-    messages = CHATS["pt, overpayment"]
+    messages = CHATS["en, overpayment"]
     transcript = llm.read_image(scam_check.READ_PROMPT, screenshot(*messages, blur=6))
     real = {scam_check.skeleton(word) for _, text in messages for word in text.split()} | {""}
     copied = re.sub(r"(?m)^(Buyer|Seller):", "", scam_check.sanitize(transcript)).split()
@@ -88,5 +88,5 @@ def test_eval_screenshot_through_the_whole_graph(api, monkeypatch):
     capture(api, httpx.Response(404))
     search(api)
     monkeypatch.setattr(db, "save_case", lambda *args: None)
-    out = scam_check.run("", "25.00", "EUR", screenshot(*CHATS["pt, overpayment"]))
+    out = scam_check.run("", "25.00", "EUR", screenshot(*CHATS["en, overpayment"]))
     assert out["verdict"] == "SCAM_LIKELY", out["evidence"]
