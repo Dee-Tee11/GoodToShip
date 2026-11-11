@@ -5,7 +5,7 @@
 Built for the PayPal AI Hackathon (deadline 12 Nov 2026, 20:00 Lisbon). PayPal Sandbox only, no real cases.
 
 - **Live demo:** `https://goodtoship.onrender.com` (sell something, pay as a test buyer, ask the chat to check the buyer's messages, watch every step live)
-- **Demo video:** `<link: add before submitting>`
+- **Demo video:** `https://youtu.be/txNc40kjuZ0`
 - **Full reference** (every graph, rule, endpoint and test): [docs/DETAILS.md](docs/DETAILS.md)
 
 ## The problem
