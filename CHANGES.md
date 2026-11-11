@@ -1,5 +1,52 @@
 # Changes
 
+## 2026-11-10: `/code-review` of the uncommitted work (#35, #52, the E07 review)
+
+Ten findings; the user accepted #4 (a person offered in Studio and the evals too, where nobody answers) and #8 (no check: an answer naming a verdict always falls back, to the right quoted sentence). The rest fixed:
+
+- **#1 `SHIPPED` too wide:** "the money was already sent" and "I sent them the invoice" matched. "Sent" now counts only with the item as its object (it, the item/order/parcel/package), "already" only with shipped, posted, mailed or dispatched, and "it was sent" no longer counts.
+- **#2 the permission relaxed too far:** "You can refund…" passed when the note said "Don't refund outside PayPal". `_permitted`'s verb must be in the note outside its negated clauses, and never a ship verb.
+- **#3 a go-ahead through the ship rule:** "Go ahead and ship the item to the address…" and "You can ship the item…" passed `_ship_grounded`. Only the verb "ship" itself passes now, in a sentence with no permission phrase.
+- **#5 the check's note for any unanswered question:** after a VERIFIED check, an unrelated question no search answers got "You can ship". The check's note now comes only right after the check (no message before it, no notes shown) and only when the LLM picked nothing, from `classify`; later it is `DONT_KNOW` and the offer of a person.
+- **#6 an old "I shipped":** for `can_ship`, only this message is read for `SHIPPED`; the message before counts only for "what now?".
+- **#7 `another_payment` → `advise`:** sends no entries, so an LLM pick never reaches `advise` unfiltered.
+- **#9, #10:** `card()` and `intro()` lost their `operators` parameter (always a person now); the demo's stale comment is gone. `WAIT_MEANS` is the WAIT sentence of both `vg_why_wait` and `vg_verdict_meanings`.
+- **Reruns, rules only:** E07 26 and 57 (`E07-seller-20261110T223839Z`), E08 1, 2, 3, 15, 19 (`E08-weak-20261110T223951Z`): 3 and 15 still answer in the LLM's words, 19 shows the sign with no "no check" lead, 57 says the notes are all, 26 gets the check's steps. E08 1 fails only turn 1's expected note, as before.
+- **Tests:** U22 (one: no go-ahead or negated permission through the relaxed rules), C52 (two: a payment sent is not the item shipped; an old "I shipped" never hides a verdict), C51 (later, `DONT_KNOW`), C05 (a message between the check and the search). 691 passing offline, 6 skipped.
+
+## 2026-11-10: RECHECK #35, "what now?" reads what the seller said
+
+The user's go on the plan of 2026-11-09. No new node, state field or note.
+
+- **Already shipped:** `chat.SHIPPED` (English: "already shipped", "I posted the item", "the order was sent"…; not "I haven't shipped"). `classify` puts `vg_already_shipped` first for a `question` that says it, and makes it the only entry for `can_ship` or `next_steps` when this message or the one before says it. `advise` shows it before anything else, so a seller who shipped never gets "Before you ship" (E08 2, E07 53).
+- **The note after a sign:** `chat.NEXT_AFTER_SIGN`. "What now?" after the overpayment sign shows `pp_overpayment` ("consider canceling the order"), after a fake proof `pp_fake_emails`; other signs keep "Before you ship" (E08 1).
+- **A sign in a ship question:** `classify`'s prompt lets the LLM pick one warning-sign note for `can_ship` or `next_steps` when the message itself describes one. The code keeps only `vg_signal_` notes there (and a hold's note for `can_ship`, as before), and for `next_steps` only one not just shown. `advise` then shows the sign, never "You can ship", led by `NEW_SIGN` ("Your message describes a warning sign that no check has seen. Don't ship yet: say check…") and closed with the check offer; with no lead when the last check already saw that sign (E08 19). The LLM can only make the reply warier.
+- **E08, full** (`E08-weak-20261110T221639Z`, rules, then judged by Claude Haiku 5.5 as a subagent with `JUDGE_PROMPT`): rules 29/33 cases. Judge: correct 31/33, next_steps 30/33, answers_last 29/33, safe 33/33, covers_reference 23/33, mean 3.42 (2026-11-07, 30 cases: 30/30, 26/30, 22/30, 30/30, 21/30, 3.57). E08 1 now suggests cancelling; E08 2 starts with "Already shipped". E08 19 scored 2 ("no check has seen" after a VERIFIED_WITH_WARNINGS that saw the label): fixed after the run, rerun alone. E08 6's turn 1, a statement about the buyer's label, was classified `can_ship` and got the new-sign reply. E08 26's reference still says not to explain a verdict before a check, which the meanings note (2026-11-09) now does.
+- **Not rerun:** E06 and E10 (`classify`'s prompt changed), E07 53 and 54.
+- **Tests:** C52 (four: already shipped, a new sign is never "You can ship", a sign the check saw), C31, C32 and C38 updated. 686 passing offline, 6 skipped.
+
+## 2026-11-09: the user's review of E07 (`E07-seller-20261109T180836Z`), cases 18, 26, 30, 40, 42 and 57
+
+The user read the run (rules only) and approved one fix per case. No graph change: no new node, edge or state field.
+
+- **18, a person everywhere:** the demo is the live product, so the chat no longer asks the run's context whether it may offer a person. `DEMO_ONLY` ("Talking to a person … isn't available here for now") and `chat._operators()` are gone; `handoff` always asks for consent, the card always ends with `OPERATOR_STEP`, the intro with `PERSON`, and a reply with nothing new with `OFFER_OPERATOR`, in Studio and the evals too. The demo no longer passes `{"operators": True}`. E07 18's turn 2 ("Who can help me?") accepts `handoff` as well as `question`.
+- **26, no note after a check:** a question no note answers, with no PayPal page found, gets the check's own "what to do" note ("About your last check (…)") and the offer of a person, not "I don't have that information". With no check, `DONT_KNOW` and the offer of a person.
+- **30, the deadline alone:** a note picked again whole is no longer shown beside a new one, so "How long do I have to answer?" after "How to respond" gets "When to respond to a dispute" only.
+- **40, the verdicts with no check:** a new note, `vg_verdict_meanings` ("What GoodToShip's verdicts mean"), built from `scam_check.STEPS`'s own sentences, with no "ship": what each of the four verdicts means, then "say check". `classify` swaps `vg_verdicts` (which says "You can ship") for it when the chat has no check.
+- **42 and 57, no sentences:** when the answer step writes no sentence (its prompt's "the notes don't answer the message"), the reply is "The notes in my last reply are all I have on this." and the offer of a person, not one or two of the notes' sentences quoted loose. A rejected answer still quotes the notes, as before. The eval counts that reply as a fallback.
+- **E07 rerun of 18, 26, 30, 40, 42, 43, 57** (`E07-seller-20261109T215317Z`, rules only): 26, 30's turn 2, 40 and 57 as intended; 18 asked for consent (the old dataset, rerun before its update). 30's turn 1 still lacks the deadline (unchanged). 42's turn 2 went to `other` and 43's to `advise` ("Before you ship" again): `classify`'s picks varied from the run before, nothing these fixes touch (#35, #38).
+- **Tests:** the answer stub now fails by default (an error), since an empty answer has its own reply. C22 (the meanings note), C25 (no sentences), C28 and C40 (a person everywhere), two C51 (26 and 30); C36 removed. 683 passing offline, 6 skipped.
+
+## 2026-11-09: RECHECK #52, partly: two of the answer step's rules relaxed
+
+The LangSmith key is write-only, so the rejected answers were read by replaying E08 3, 6, 8, 12 and 15 locally twice (rules only, `EVAL_JUDGE=0`), with `check_answer` wrapped to print what it rejected. Every rejection but one was a faithful answer:
+
+- **Ship from PayPal's own requirement (E08 3):** "Ship the item to the address shown on the Transaction Details page" quoted `pp_seller_protection`, and failed "a verdict or shipping without the last check's note". `output_guardrails._ship_grounded` lets a ship word through when each ship clause (the words after the verb, up to the clause's end) takes at least two thirds of its words from a cited `pp_` note's own ship clause. "Ship it now" has no words and still fails. A `vg_` note's ship (the verdicts) still needs the last check's note.
+- **A synonym after "you can" (E08 15):** "You can issue a full or partial refund…" cited "You can send…", and failed "a permission not in its sources". `_permitted` accepts it when "you can/may/could" is in the cited sentence and the verb is in the same note (`pp_refund_in_paypal`'s "click Issue a refund"). "safe to", "allowed to" and the rest still need the whole phrase.
+- **The prompt:** "Keep a note's not or never" now says what that means: a word a note writes only after not or never is written only after not or never, even about someone else.
+- **After (same 5 cases, twice):** fallbacks 5 of 7 before (`E08-weak-20261107T200506Z`), 2 of 4 in each rerun. E08 3 and 15 answer. Still falling back: E08 12, "The card issuer decides the outcome." from "…made by the card issuer and PayPal doesn't decide the outcome" (true, but the negation rule is lexical and the prompt line didn't change the model's wording); E08 6, "the buyer's PayPal address", which no note says (rightly rejected). E07 57, the injection aimed at the answer step: no sentences, the notes quoted.
+- **Tests:** U22, one new (PayPal's requirement passes, a bare or redirected ship and a verdict note's ship fail, a synonym permission passes, a new verb fails). 683 passing offline, 6 skipped.
+
 ## 2026-11-08: RECHECK #50, #53, #54 and #55, and E08 31
 
 The user's decisions on the rest of the points from the evals of 2026-11-07.

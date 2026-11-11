@@ -183,3 +183,25 @@ def test_u22_words_only_from_the_seller_are_not_grounded():  # review #1
     text = "Friends family payments covered protection tracking."
     assert any("too few words" in e for e in output_guardrails.check_answer(
         [Cited(text=text, sources=[1])], listed, "", "friends family covered protection", None))
+
+
+def test_u22_paypals_own_ship_requirement_and_a_synonym_permission():  # RECHECK #52: E08 3 and 15 fell back
+    assert answer(["pp_seller_protection"], "Ship the item to the address shown on the Transaction Details page.",
+                  [3]) == []
+    assert answer(["pp_seller_protection"], "Ship it now.", [3])  # a bare go-ahead: no words from the requirement
+    assert answer(["pp_seller_protection"], "Ship it today to the buyer's new address.", [3])
+    assert answer(["vg_verdicts"], "Ship only to the address on this payment's Transaction Details page in PayPal.",
+                  [3])  # a verdict note's ship: still only from the last check's note
+    assert answer(["pp_refund_in_paypal"], "You can issue a full or partial refund within 180 days of the payment date.",
+                  [3]) == []
+    assert answer(["pp_refund_in_paypal"], "You can cancel a full or partial refund within 180 days.", [3])
+
+
+def test_u22_no_go_ahead_or_forbidden_permission_through_the_relaxed_rules():  # review 2026-11-10, #2 and #3
+    listed = [("pp_x", "Ship the item to the address on the Transaction Details page."),
+              ("pp_y", "Don't refund outside PayPal."), ("pp_y", "You can send the buyer a message.")]
+    check = lambda text, n: output_guardrails.check_answer([Cited(text=text, sources=[n])], listed, "", "", None)
+    assert check("Ship the item to the address on the Transaction Details page.", 1) == []
+    assert check("Go ahead and ship the item to the address on the Transaction Details page.", 1)
+    assert check("You can ship the item to the address on the Transaction Details page.", 1)
+    assert any("permission" in e for e in check("You can refund the buyer a message.", 3))

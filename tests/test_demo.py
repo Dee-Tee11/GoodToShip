@@ -372,13 +372,13 @@ def test_d20_only_a_yes_hands_the_whole_conversation_over(demo_db, choice, llm_s
         {"who": "seller", "text": "", "image": f"data:image/png;base64,{png}"},
         {"who": "goodtoship", "text": held_reply(chat.READ_NO_ID)},
         {"who": "seller", "text": "45.00 USD"},
-        {"who": "goodtoship", "text": chat.card(FAKE, True)},
+        {"who": "goodtoship", "text": chat.card(FAKE)},
         {"who": "seller", "text": "check"},
         {"who": "goodtoship", "text": chat.ASK_PRICE},
         {"who": "seller", "text": "45.00 USD"},
         {"who": "goodtoship", "text": chat.ASK_CHAT},
         {"who": "seller", "text": "Buyer: paid", "image": f"data:image/png;base64,{png}"},
-        {"who": "goodtoship", "text": chat.card(FAKE, True)},
+        {"who": "goodtoship", "text": chat.card(FAKE)},
         {"who": "seller", "text": "operator"},
         {"who": "goodtoship", "text": chat.ASK_CONSENT},
         {"who": "seller", "text": "no"},
@@ -464,7 +464,7 @@ def test_d25_a_persons_answers_reach_the_seller_but_never_the_graph(demo_db, cho
 
 def test_d29_goodtoship_speaks_first(demo_db, choice, monkeypatch):
     s = client.post("/demo/api/session").json()
-    assert s["intro"] == chat.intro(True) and s["intro"].endswith(chat.PERSON)
+    assert s["intro"] == chat.intro() and s["intro"].endswith(chat.PERSON)
     assert demo.chat_graph.get_state(demo._thread(s["session_id"])).values["greeted"] is True
     choice.intent = "other"
     assert said({"X-Demo-Session": s["session_id"]}, "Hi")["reply"] == chat.SCOPE  # not the intro again
@@ -512,7 +512,7 @@ def test_d31_closing_deletes_what_the_person_saw_and_starts_the_chat_over(demo_d
     (row,) = demo_db[sid]["handoffs"]
     assert row["transcript"] == [] and row["last_case"] is None  # what the person saw is deleted
     assert client.get("/demo/api/state", headers=h).json()["handoffs"] == [
-        {"id": shared["id"], "status": "closed", "replies": ["Hi"], "notice": f"{chat.CLOSED}\n\n{chat.intro(True)}"}]
+        {"id": shared["id"], "status": "closed", "replies": ["Hi"], "notice": f"{chat.CLOSED}\n\n{chat.intro()}"}]
     assert sid not in demo._transcripts and demo.chat_graph.get_state(demo._thread(sid)).values == {
         "messages": [], "greeted": True}  # as a new session's
     choice.intent = "other"

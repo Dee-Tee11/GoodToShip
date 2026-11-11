@@ -108,7 +108,7 @@ def new_session(request: Request):
     _greet(session_id)  # no busy(): nobody has this id yet
     return {"session_id": session_id, "client_id": os.environ["PAYPAL_CLIENT_ID"], "currency": CURRENCY,
             "buyer_email": os.environ["DEMO_BUYER_EMAIL"], "buyer_password": os.environ["DEMO_BUYER_PASSWORD"],
-            "intro": chat.intro(True)}  # not in the transcript: fixed text, nothing of the seller's
+            "intro": chat.intro()}  # not in the transcript: fixed text, nothing of the seller's
 
 
 def _paypal_error(r, what: str) -> HTTPException:
@@ -204,7 +204,7 @@ def ship_order(order_id: str, request: Request, session_id: str = Depends(sessio
 def state(session_id: str = Depends(session)):
     out = db.demo_state(session_id)
     # live, not saved with the session: the page shows its operator section, and the intro offers a person, only then
-    intro = chat.intro(True)
+    intro = chat.intro()
     for h in out["handoffs"]:  # the page shows it once, where the chat started over
         if h["status"] == "closed":
             h["notice"] = f"{chat.CLOSED}\n\n{intro}"
@@ -349,10 +349,9 @@ def chat_turn(session_id: str, message: str, image: bytes | None, checks: list[s
     # the thread's messages start afresh each turn: no node reads past the newest. _keep_latest drops them when a turn
     # ends; this clears what a turn the graph raised in left
     turn_input = {"messages": [RemoveMessage(id=REMOVE_ALL_MESSAGES), {"role": "user", "content": content}]}
-    # the run's context, not configurable, so it isn't copied into the checkpoints. Only the demo has an operator page,
-    # so only it offers a person. LIVE: check streams its
+    # the run's context, not configurable, so it isn't copied into the checkpoints. LIVE: check streams its
     # steps, only for a message that runs one: the custom stream moves every node onto LangGraph's background threads
-    context = {"operators": True, **({"live": chat.LIVE} if checks else {})}
+    context = {"live": chat.LIVE} if checks else {}
     case_id = None
     # durability="exit": one checkpoint, as the run ends (an error too), not one per step with the screenshot in each
     for mode, chunk in chat_graph.stream(turn_input, _thread(session_id), context=context, durability="exit",

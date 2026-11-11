@@ -27,8 +27,10 @@ FAKE_RESULT = {"case_id": "c1", "verdict": "WAIT", "policy_id": "P.WAIT_NOT_CONF
 @pytest.fixture
 def choice(llm_stub, monkeypatch):
     """The classify answer (`intent` may be an exception), the follow-up's `answer` ([(text, sources)] or an exception;
-    none by default, so the notes are quoted) and every Groq prompt; scam_check's calls go to llm_stub."""
-    stub = SimpleNamespace(intent="other", entries=[], sentences=[], calls=[], prompts=[], answer=[], answers=[])
+    an error by default, so the notes are quoted; [] is the model's "the notes don't answer it") and every Groq prompt;
+    scam_check's calls go to llm_stub."""
+    stub = SimpleNamespace(intent="other", entries=[], sentences=[], calls=[], prompts=[], answer=RuntimeError("no stub"),
+                           answers=[])
     scam_check_ask = llm.ask
 
     def ask(schema, system, user, attempts=2):
@@ -97,8 +99,8 @@ def talk():
 
 @pytest.fixture
 def demo_talk():
-    """A thread run as the demo runs it: with an operator page."""
-    return Talk({"operators": True})
+    """A thread run as the demo runs it. Since 2026-11-09 every thread offers a person, so it is talk's twin."""
+    return Talk()
 
 
 def results(*urls, title="PayPal page"):
@@ -112,6 +114,7 @@ def unverify(monkeypatch, *keys):
 
 
 US = policy_pack.PAYPAL_PAGES + "cshelp/article/x-help1"
+DONT_KNOW = f"{chat.DONT_KNOW}\n\n{chat.OFFER_OPERATOR}"  # a person offered, everywhere since 2026-11-09
 
 
 def shot(text="", image=PNG, kind="png"):
@@ -247,6 +250,7 @@ def test_c05_the_buyers_chat_never_reaches_the_chat_llm_or_tavily(choice, talk, 
     talk("25.00 EUR")
     reply = talk(canary)
     assert reply.startswith("SCAM_LIKELY: ")
+    talk("hello")  # right after the check, a question no note answers gets the check's steps, not a search (E07 26)
     choice.intent = "question"
     talk("is Friends and Family safe?")
     assert [n for n, prompt in choice.prompts if "CANARY-BUYER-LINE" in prompt] == ["SignalsOut"]
@@ -298,7 +302,7 @@ def test_c09_only_paypal_us_links_are_shown(choice, talk, tavily):
             + [{"title": "ok", "url": u, "content": "CONTENT-CANARY"} for u in good[2:]], "answer": "ANSWER-CANARY"}
     tavily.mock(return_value=httpx.Response(200, json=body))
     reply = talk("is Friends and Family safe?")
-    lines = reply.splitlines()[1:]
+    lines = reply.splitlines()[1:-2]  # then a blank line and the offer of a person
     assert lines == [f"clickhttpsevil.comnext: {good[0]}", good[1], f"ok: {good[2]}"]
     assert "CANARY" not in reply
 
@@ -312,13 +316,13 @@ def test_c09_only_paypal_us_links_are_shown(choice, talk, tavily):
 def test_c10_tavily_down_says_i_dont_know(choice, talk, tavily, response):
     choice.intent = "question"
     tavily.mock(side_effect=[response])
-    assert talk("is Friends and Family safe?") == chat.DONT_KNOW
+    assert talk("is Friends and Family safe?") == DONT_KNOW
 
 
 def test_c10_no_key_means_no_request(choice, talk, tavily, monkeypatch):
     monkeypatch.setattr(chat, "TAVILY_KEY", "")
     choice.intent = "question"
-    assert talk("is Friends and Family safe?") == chat.DONT_KNOW and not tavily.called
+    assert talk("is Friends and Family safe?") == DONT_KNOW and not tavily.called
 
 
 def test_c11_the_search_carries_no_personal_data(choice, talk, tavily):
@@ -475,7 +479,7 @@ def test_u16_unverified_entries_are_never_shown(choice, talk, tavily, monkeypatc
     tavily.mock(return_value=results())
     unverify(monkeypatch, "vg_why_wait", "pp_friends_and_family")
     choice.intent, choice.entries = "question", ["vg_why_wait", "pp_friends_and_family"]
-    assert talk("what does WAIT mean?") == chat.DONT_KNOW
+    assert talk("what does WAIT mean?") == DONT_KNOW
     choice.intent = "other"
     assert policy_pack.POLICY_PACK["vg_why_wait"]["title"] not in talk("hi")
 
@@ -570,7 +574,7 @@ def test_c19_a_note_just_shown_answers_with_its_picked_sentences_word_for_word(c
     choice.sentences = [5, 99, 0, 5]  # out of range and repeated numbers are dropped
     entry = chat.VERIFIED["pp_refund_in_paypal"]
     assert talk("Do I get my fees back?") == (f"{entry['title']}\nBut PayPal doesn't return the fees you paid when you "
-                                              f"got the payment.\nSource: {entry['source_url']}\n\n{scam_check.SUPPORT}")
+                                              f"got the payment.\nSource: {entry['source_url']}\n\n{chat.OFFER_OPERATOR}")
     assert talk.state["shown"] == ["pp_refund_in_paypal"]
 
 
@@ -578,7 +582,7 @@ def test_c19_a_follow_up_with_nothing_picked_is_dont_know(choice, talk):
     choice.intent, choice.entries = "question", ["pp_payment_hold"]
     talk("Why is my payment on hold?")
     choice.entries = []
-    assert talk("How long does it usually last?") == chat.DONT_KNOW
+    assert talk("How long does it usually last?") == DONT_KNOW
     assert "see my last answer" not in chat.DONT_KNOW
 
 
@@ -685,12 +689,14 @@ def test_c21_the_prompt_lists_the_warning_sign_notes_apart(choice, talk):
 VERIFIED_CASE = {"case_id": "c" * 32, "policy_id": "P.VERIFIED", "signals": []}
 
 
-@pytest.mark.parametrize("entries", [["vg_verified"], ["vg_wait_not_paid"], ["vg_verdicts"], ["vg_verified", "vg_verdicts"]])
-def test_c22_no_verdict_note_without_a_check(choice, talk, entries):
+@pytest.mark.parametrize("entries, want", [(["vg_verified"], ["vg_how_to_check"]), (["vg_wait_not_paid"], ["vg_how_to_check"]),
+                                           (["vg_verdicts"], ["vg_verdict_meanings"]),
+                                           (["vg_verified", "vg_verdicts"], ["vg_verdict_meanings"])])
+def test_c22_no_verdict_note_without_a_check(choice, talk, entries, want):  # E07 40: the meanings, never "You can ship"
     choice.intent, choice.entries = "question", entries
     reply = talk("What does VERIFIED mean?")
-    assert talk.state["entries"] == ["vg_how_to_check"] and "You can ship" not in reply
-    assert all(chat.VERIFIED[k]["title"] not in reply for k in entries)
+    assert talk.state["entries"] == want and "You can ship" not in reply
+    assert all(chat.VERIFIED[k]["text"] not in reply for k in entries)
 
 
 def test_c22_a_gated_note_leaves_the_others(choice, talk):
@@ -775,7 +781,6 @@ def invalid():
 @pytest.mark.parametrize("answer", [
     pytest.param(RuntimeError("groq down"), id="llm error"),
     pytest.param(invalid(), id="schema error"),
-    pytest.param([], id="no sentences"),
     pytest.param([GOOD[0], ("PayPal covers it within 12 days.", [4])], id="one bad sentence"),
     pytest.param([("Friends and Family payments are covered.", [3, 4])], id="injected flip"),
     pytest.param([("You can ship it today.", [2])], id="ship without a check"),
@@ -783,7 +788,7 @@ def invalid():
 def test_c25_any_failure_quotes_the_notes_as_before(choice, talk, answer):
     sentence = chat._listed(["pp_friends_and_family"])[1][1]
     assert ff_follow_up(choice, talk, answer) == (f"{FF['title']}\n{sentence}\nSource: {FF['source_url']}"
-                                                  f"\n\n{scam_check.SUPPORT}")
+                                                  f"\n\n{chat.OFFER_OPERATOR}")
     assert len(choice.answers) == 1
 
 
@@ -808,7 +813,7 @@ def test_c26_a_shown_note_picked_again_is_a_follow_up_on_all_of_it(choice, talk)
     assert reply == f"{GOOD[0][0]} {GOOD[1][0]}\n\nFrom my notes: {FF['title']}\nSource: {FF['source_url']}"
     assert choice.answers[0].user.startswith("<notes>\n" + "\n".join(chat._numbered(chat._listed(["pp_friends_and_family"]))))
     choice.answer = []  # rejected: never DONT_KNOW, and never the whole note word for word again (E07 cases 2, 16)
-    assert talk("And then?") == f"{chat.SAME_STEPS}\n\n{scam_check.SUPPORT}"
+    assert talk("And then?") == f"{chat.SAME_STEPS}\n\n{chat.OFFER_OPERATOR}"
 
 
 def test_c26_a_gated_pick_of_the_note_just_shown_is_not_dont_know(choice, talk):  # E07 case 40
@@ -817,6 +822,11 @@ def test_c26_a_gated_pick_of_the_note_just_shown_is_not_dont_know(choice, talk):
     choice.entries = ["vg_scam_likely"]
     reply = talk("OK, and SCAM_LIKELY?")
     assert len(choice.answers) == 1 and reply.startswith(chat.SAME_STEPS)  # the gated pick is the note just shown
+
+
+def test_c25_no_sentences_says_the_notes_are_all_and_offers_a_person(choice, talk):  # E07 42, 57
+    assert ff_follow_up(choice, talk, []) == f"{chat.SAME_STEPS}\n\n{chat.OFFER_OPERATOR}"
+    assert talk.state["shown"] == ["pp_friends_and_family"]
 
 
 def test_c25_ship_only_from_the_last_checks_own_note(choice, talk):
@@ -927,13 +937,11 @@ def test_c28_a_screenshot_at_the_chat_step_that_cant_be_read_is_asked_for_again(
     assert talk.state["awaiting"] == "chat" and talk.state["price"] == {"amount": "25.00", "currency": "USD"}
 
 
-def test_c28_on_the_demo_the_card_ends_its_steps_with_a_person(choice, talk, demo_talk, ran):
-    for t in (talk, demo_talk):
-        t("check")
-        t("25.00 USD")
-    assert chat.OPERATOR_STEP not in talk(PAID)  # Studio and the evals: no operator page
-    assert demo_talk(PAID) == chat.card(FAKE_RESULT, True)
-    assert f"{len(FAKE_RESULT['steps']) + 1}. {chat.OPERATOR_STEP}\n{scam_check.SUPPORT}" in chat.card(FAKE_RESULT, True)
+def test_c28_the_card_ends_its_steps_with_a_person(choice, talk, ran):
+    talk("check")
+    talk("25.00 USD")
+    assert talk(PAID) == chat.card(FAKE_RESULT)
+    assert f"{len(FAKE_RESULT['steps']) + 1}. {chat.OPERATOR_STEP}\n{scam_check.SUPPORT}" in chat.card(FAKE_RESULT)
 
 
 HOW = chat.VERIFIED["vg_how_to_check"]["text"]
@@ -1014,7 +1022,8 @@ def test_c31_after_a_warning_sign_its_step_then_before_you_ship(choice, talk, si
     choice.intent, choice.entries = "question", [sign]
     talk("The buyer asks for something odd")
     choice.intent, choice.entries = "next_steps", []
-    assert talk("What do I do now?") == "\n\n".join([chat._note(sign), chat._note("vg_before_you_ship"), close])
+    after = chat.NEXT_AFTER_SIGN.get(sign, "vg_before_you_ship")  # RECHECK #35: overpaid, PayPal's "consider canceling"
+    assert talk("What do I do now?") == "\n\n".join([chat._note(sign), chat._note(after), close])
 
 
 def test_c31_after_already_shipped_never_before_you_ship(choice, talk):
@@ -1022,7 +1031,7 @@ def test_c31_after_already_shipped_never_before_you_ship(choice, talk):
     talk("I already shipped and the payment isn't there")
     choice.intent, choice.entries = "next_steps", []
     # the last reply was that note: not the same notes word for word again (review #7)
-    assert talk("What now?") == f"{chat.SAME_STEPS}\n\n{scam_check.SUPPORT}"
+    assert talk("What now?") == f"{chat.SAME_STEPS}\n\n{chat.OFFER_OPERATOR}"
 
 
 def test_c31_after_a_dispute_note_how_to_respond_and_by_when(choice, talk):
@@ -1050,7 +1059,7 @@ def test_c31_the_last_reply_comes_before_the_last_check(choice, talk):
 def test_c32_backstop_a_what_now_that_classify_called_a_repeat_or_nothing(choice, talk, tavily):  # E08 case 4
     choice.intent, choice.entries = "question", ["vg_signal_overpayment_refund"]
     talk("The buyer overpaid and wants the difference back")
-    steps = f"{chat._note('vg_signal_overpayment_refund')}\n\n{chat._note('vg_before_you_ship')}"
+    steps = f"{chat._note('vg_signal_overpayment_refund')}\n\n{chat._note('pp_overpayment')}"
     assert talk("what now?").startswith(steps)  # the same note again, no sentences: a repeat
     choice.entries = []
     assert talk("What should I do?") == f"{chat.SAME_STEPS}\n\n{chat.OFFER_CHECK}"  # no note: no search, and no repeat
@@ -1071,7 +1080,7 @@ def test_c32_backstop_a_can_i_ship_that_classify_called_a_question(choice, talk)
 def test_c32_look_alikes_stay_questions(choice, talk, monkeypatch, message):
     monkeypatch.setattr(chat, "TAVILY_KEY", "")
     choice.intent = "question"
-    assert talk(message) == chat.DONT_KNOW and len(choice.calls) == 1
+    assert talk(message) == DONT_KNOW and len(choice.calls) == 1
 
 
 def test_c33_advise_at_the_price_step_ends_the_check(choice, talk):
@@ -1131,16 +1140,6 @@ def test_c35_anything_else_shares_nothing_and_reaches_nothing(choice, demo_talk,
     assert choice.calls == [] and not tavily.called and not ran
     choice.intent, choice.entries = "question", ["vg_why_wait"]
     assert demo_talk("What does WAIT mean?").startswith(chat.VERIFIED["vg_why_wait"]["title"])  # classified as before
-
-
-@pytest.mark.parametrize("message", ["Can I talk to a human?", "operator"])
-def test_c36_without_the_demos_context_a_person_is_demo_only(choice, talk, message):
-    choice.intent = "human"
-    assert talk(message) == chat.DEMO_ONLY
-    assert not talk.state.get("awaiting") and "consented" not in talk.state
-    talk("check")
-    assert talk(message) == f"{chat.DEMO_ONLY}\n\n{chat.CHECK_STOPPED}"  # it still ends the check
-    assert talk.state["awaiting"] is None and talk.state["price"] is None
 
 
 def test_c36_the_input_cannot_consent(choice, demo_talk):
@@ -1203,7 +1202,9 @@ HOLD_TITLE = chat.VERIFIED["pp_payment_hold"]["title"]
 def test_c38_the_hold_note_only_when_the_seller_talks_about_a_hold(choice, talk, message, kept):
     choice.intent, choice.entries = "question", ["pp_fake_emails", "pp_payment_hold"]
     reply = talk(message)
-    assert talk.state["entries"] == ["pp_fake_emails", "pp_payment_hold"][:1 + kept]
+    shipped = ["vg_already_shipped"] if chat.SHIPPED.search(message) else []  # E07 18: first, the item went (#35)
+    if talk.state["intent"] == "question":  # E08 23 is can_ship (the backstop): advise reads only the hold's note
+        assert talk.state["entries"] == [*shipped, "pp_fake_emails", "pp_payment_hold"][:1 + kept + len(shipped)]
     assert (HOLD_TITLE in reply) is kept
 
 
@@ -1261,7 +1262,7 @@ def test_c39_a_failed_answer_step_shows_the_note_again(choice, talk, sentences, 
     choice.intent, choice.entries = "question", ["vg_signal_off_platform"]
     talk("The buyer asked to continue on WhatsApp instead of the marketplace chat. Is that a problem?")
     choice.sentences = sentences
-    assert talk("Why does it matter?") == f"{shown}\n\n{scam_check.SUPPORT}"
+    assert talk("Why does it matter?") == f"{shown}\n\n{chat.OFFER_OPERATOR}"
     assert talk.state["shown"] == ["vg_signal_off_platform"] and len(choice.answers) == 1
 
 
@@ -1273,13 +1274,13 @@ def test_c39_a_lists_heading_is_never_quoted_without_its_items(choice, talk):  #
         "Steps:\n- one\n- two", "Done.", "Then:\n- three"]
     choice.intent, choice.entries = "question", ["pp_respond_to_dispute"]
     talk("How do I respond to a dispute?")
-    choice.answer, choice.sentences = [], [n]  # the answer step fails: the picked sentence is quoted, items and all
+    choice.answer, choice.sentences = RuntimeError("down"), [n]  # the answer step fails: the picked sentence is quoted, items and all
     assert f"{heading}\n" in talk("What evidence should I send?")
 
 
 def test_c39_on_the_demo_a_failed_answer_step_offers_a_person(choice, demo_talk):  # E08 cases 9, 15
     assert closers(ff_follow_up(choice, demo_talk, GOOD)) == []  # an answer that passed: no new closing line
-    choice.answer, choice.sentences = [], [1, 2]
+    choice.answer, choice.sentences = RuntimeError("down"), [1, 2]
     s1, s2 = (s for _, s in chat._listed(["pp_friends_and_family"])[:2])
     assert demo_talk("And what do they do then?") == (f"{FF['title']}\n{s1} {s2}\nSource: {FF['source_url']}"
                                                       f"\n\n{chat.OFFER_OPERATOR}")
@@ -1302,20 +1303,19 @@ def test_c39_a_mixed_fallback_quotes_one_note_and_shows_the_other_in_full(choice
     choice.entries, choice.sentences = ["pp_ff_no_seller_protection"], [3]
     s3 = chat._listed(["pp_friends_and_family"])[2][1]
     assert talk("What should I tell the buyer?") == "\n\n".join(
-        [chat._note("pp_friends_and_family", [s3]), chat._note("pp_ff_no_seller_protection"), scam_check.SUPPORT])
+        [chat._note("pp_friends_and_family", [s3]), chat._note("pp_ff_no_seller_protection"), chat.OFFER_OPERATOR])
 
 
 def test_c39_the_last_checks_note_is_not_repeated(choice, talk):
     talk.graph.update_state(talk.config, {"cases": [VERIFIED_CASE]}, as_node="check")
     choice.intent, choice.entries = "question", ["vg_verified"]
     assert talk("What do I do now?").startswith("About your last check (case cccccccc):")
-    assert talk("And then?") == f"{chat.SAME_STEPS}\n\n{scam_check.SUPPORT}"
+    assert talk("And then?") == f"{chat.SAME_STEPS}\n\n{chat.OFFER_OPERATOR}"
 
 
-def test_c40_the_intro_offers_a_person_only_on_the_demo(choice, talk, demo_talk):
-    assert demo_talk("Hello!") == chat.intro(True) == f"{chat.intro(False)}\n\n{chat.PERSON}"
-    assert talk("Hello!") == chat.intro(False) and chat.PERSON not in chat.intro(False)
-    assert chat.intro(False).startswith(chat.INTRO)  # the same three things everywhere
+def test_c40_the_intro_offers_a_person(choice, talk):
+    assert talk("Hello!") == chat.intro()
+    assert chat.intro().startswith(chat.INTRO) and chat.intro().endswith(chat.PERSON)
 
 
 def test_c41_each_area_word_lists_its_notes_without_the_llm(choice, talk):
@@ -1352,7 +1352,7 @@ def test_c42_topics_from_the_llm_lists_the_area_the_message_names_or_the_areas(c
 
 def test_c42_before_the_greeting_the_intro_comes_first(choice, talk):
     choice.intent = "topics"
-    assert talk("What do you know?") == chat.intro(False)
+    assert talk("What do you know?") == chat.intro()
     assert talk("What do you know?") == chat.TOPICS
 
 
@@ -1576,7 +1576,7 @@ def test_c46_at_the_price_step_an_id_goes_to_classify(choice, talk):
 def test_c47_a_chargeback_shows_its_note_first_and_never_the_10_day_rule(choice, talk, message):
     choice.intent, choice.entries = "dispute", ["pp_dispute_deadline", "pp_respond_to_dispute"]
     reply = talk(message)
-    assert reply == "\n\n".join([chat._note("pp_chargeback"), chat._note("pp_respond_to_dispute"), scam_check.SUPPORT])
+    assert reply == "\n\n".join([chat._note("pp_chargeback"), chat._note("pp_respond_to_dispute"), chat.OFFER_OPERATOR])
     assert talk.state["shown"] == ["pp_chargeback", "pp_respond_to_dispute"]
     deadline = chat.VERIFIED["pp_dispute_deadline"]["text"]
     choice.intent, choice.entries = "dispute", ["pp_dispute_deadline"]
@@ -1616,7 +1616,7 @@ def test_c47_a_chargeback_question_never_gets_the_10_day_rule(choice, talk):
 def test_c47_the_llms_chargeback_pick_counts_without_a_chargeback_word(choice, talk):  # review, 2026-11-06
     choice.intent, choice.entries = "dispute", ["pp_chargeback", "pp_dispute_deadline"]
     reply = talk("The buyer's bank reversed the payment, what do I do?")
-    assert reply == "\n\n".join([chat._note("pp_chargeback"), scam_check.SUPPORT])  # a card case: no practice offer
+    assert reply == "\n\n".join([chat._note("pp_chargeback"), chat.OFFER_OPERATOR])  # a card case: no practice offer
     assert talk.state["shown"] == ["pp_chargeback"]
 
 
@@ -1725,7 +1725,7 @@ def test_c50_what_now_after_a_practice_dispute_is_how_to_respond(choice, talk):
     choice.intent = "next_steps"
     # not "Before you ship", and no offer to practise again right after a practice dispute
     assert talk("What now?") == "\n\n".join([*chat._notes(chat.RESPOND_KEYS), scam_check.SUPPORT])
-    assert talk("What now?") == "\n\n".join([chat.SAME_STEPS, scam_check.SUPPORT])
+    assert talk("What now?") == "\n\n".join([chat.SAME_STEPS, chat.OFFER_OPERATOR])
 
 
 def test_c50_what_now_after_a_shipping_proof_note_offers_no_practice(choice, talk):  # review, 2026-11-07
@@ -1784,3 +1784,71 @@ def test_c52_only_the_last_three_checks_are_kept():
     out = {"case_id": "d" * 32, "policy_id": "P.VERIFIED", "evidence": {"E1": {}}}
     cases = [{"case_id": c * 32} for c in "abc"]
     assert [c["case_id"][0] for c in chat.after_check(out, cases)["cases"]] == ["b", "c", "d"]
+
+
+def test_c51_no_note_after_a_check_gives_that_checks_steps(choice, talk, monkeypatch):  # E07 26, 2026-11-09
+    monkeypatch.setattr(chat, "TAVILY_KEY", "")
+    talk.graph.update_state(talk.config, {"cases": [{"case_id": "c" * 32, "policy_id": "P.WAIT_TOO_OLD", "signals": []}]},
+                            as_node="check")
+    talk.graph.update_state(talk.config, {"shown": [], "last_question": None}, as_node="check")  # as after_check leaves it
+    choice.intent = "question"
+    assert talk("What should I ask the buyer?") == "\n\n".join(
+        ["About your last check (case cccccccc):", chat._note("vg_wait_too_old"), scam_check.SUPPORT])
+    assert talk.state["shown"] == ["vg_wait_too_old"]
+    # later, never: a VERIFIED note's "You can ship" would answer an unrelated question (review 2026-11-10)
+    assert talk("How do I change my account email?") == DONT_KNOW
+
+
+def test_c51_a_new_note_is_not_shown_beside_the_one_just_shown(choice, talk):  # E07 30, 2026-11-09
+    choice.intent, choice.entries = "question", ["pp_respond_to_dispute"]
+    talk("How do I respond to a dispute?")
+    choice.entries = ["pp_respond_to_dispute", "pp_dispute_deadline"]
+    reply = talk("How long do I have to answer?")
+    assert reply.startswith(chat._note("pp_dispute_deadline")) and chat.VERIFIED["pp_respond_to_dispute"]["title"] not in reply
+
+
+def test_c52_the_seller_says_it_already_went(choice, talk):  # RECHECK #35, E08 2 and E07 53
+    assert chat.SHIPPED.search("I posted the item yesterday") and chat.SHIPPED.search("But I already shipped it.")
+    assert not chat.SHIPPED.search("I haven't shipped it yet") and not chat.SHIPPED.search("Can I ship it?")
+    choice.intent, choice.entries = "question", ["pp_fake_emails"]
+    talk("I posted the item yesterday because the buyer sent me a payment email, but nothing shows in PayPal.")
+    assert talk.state["entries"] == ["vg_already_shipped", "pp_fake_emails"]
+    choice.intent, choice.entries = "next_steps", []
+    reply = talk("Is there anything else I should do right now?")
+    assert chat.VERIFIED["vg_before_you_ship"]["title"] not in reply and talk.state["entries"] == ["vg_already_shipped"]
+    talk.graph.update_state(talk.config, {"cases": [WRONG_CASE], "shown": []}, as_node="check")
+    assert talk("But I already shipped it. What now?").startswith(chat._note("vg_already_shipped"))
+
+
+def test_c52_a_new_warning_sign_is_never_you_can_ship(choice, talk):  # RECHECK #35, E07 54
+    talk.graph.update_state(talk.config, {"cases": [VERIFIED_CASE]}, as_node="check")
+    choice.intent, choice.entries = "can_ship", ["vg_signal_third_party_shipping", "pp_fake_emails"]
+    reply = talk("The buyer wants me to ship to their cousin's address, that's fine, right?")
+    assert reply == "\n\n".join([chat.NEW_SIGN, chat._note("vg_signal_third_party_shipping"), chat.OFFER_CHECK])
+    assert "You can ship" not in reply and talk.state["entries"] == ["vg_signal_third_party_shipping"]
+    choice.entries = []  # no sign in this message: the check answers again
+    assert talk("So can I ship?").startswith("About your last check")
+
+
+def test_c52_a_sign_the_last_check_saw_is_not_new(choice, talk):  # E08 19
+    talk.graph.update_state(talk.config, {"cases": [{"case_id": "c" * 32, "policy_id": "P.VERIFIED_WARN",
+                                                     "signals": ["THIRD_PARTY_SHIPPING"]}]}, as_node="check")
+    choice.intent, choice.entries = "can_ship", ["vg_signal_third_party_shipping"]
+    reply = talk("Can I use the buyer's label to save time?")
+    assert reply.startswith(chat._note("vg_signal_third_party_shipping")) and chat.NEW_SIGN not in reply
+    assert "You can ship" not in reply
+
+
+@pytest.mark.parametrize("text", ["The buyer says the money was already sent, can I ship?",
+                                  "I sent them the invoice, can I ship now?", "It was already sent by the buyer."])
+def test_c52_a_payment_sent_is_not_the_item_shipped(text):  # review 2026-11-10, #1
+    assert not chat.SHIPPED.search(text)
+
+
+def test_c52_an_old_shipped_never_hides_a_later_checks_verdict(choice, talk):  # review 2026-11-10, #6
+    choice.intent = "other"
+    talk("I already shipped my other order last week, here's a new buyer")
+    talk.graph.update_state(talk.config, {"cases": [WRONG_CASE]}, as_node="check")
+    choice.intent = "can_ship"
+    assert talk("Can I ship?").startswith("No. Your last check")  # the verdict, not "Already shipped"
+    assert talk.state["entries"] == []

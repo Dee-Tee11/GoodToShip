@@ -133,6 +133,28 @@ def _ships(text: str) -> bool:
     return any(not NEGATED_SHIP.search(text[:m.start()]) for m in SHIP.finditer(text))
 
 
+def _ship_grounded(text: str, cited: list[tuple[str, str]]) -> bool:
+    """Every ship clause the sentence writes restates one a cited PayPal note writes: "Ship the item to the address on
+    the Transaction Details page" is PayPal's requirement, not a go-ahead (RECHECK #52, E08 3). Not from a vg_ note:
+    those carry the verdicts. ponytail: lexical, like the coverage rule; a bare "ship it" has no words and fails"""
+    def clauses(t):
+        return [_words(re.split(r"[,.;:()]", t[m.end():], maxsplit=1)[0]) for m in SHIP.finditer(t)
+                if not NEGATED_SHIP.search(t[:m.start()])]
+    # only the verb "ship" itself, never a go-ahead around it: "go ahead and ship…", "you can ship…" (review 2026-11-10)
+    if PERMISSION.search(text) or any(not m[0].lower().startswith("ship") for m in SHIP.finditer(text)):
+        return False
+    allowed = set().union(*(w for k, t in cited if k.startswith("pp_") for w in clauses(t)))
+    return all(w and len(w & allowed) >= COVERAGE * len(w) for w in clauses(text))
+
+
+def _permitted(phrase: str, source: str, note: str) -> bool:
+    """"you can issue" where a cited sentence says "you can send" and its note says "issue a refund" (E08 15). The verb
+    only outside the note's negated clauses ("don't refund outside PayPal" grants no refund), and never a ship verb."""
+    modal, _, verb = phrase.rpartition(" ")
+    return phrase in source or (modal.startswith("you ") and modal in source and not SHIP.search(phrase)
+                                and _stem(verb) in _words(NEGATED.sub(" ", note)))
+
+
 def check_answer(sentences: list[Cited], listed: list[tuple[str, str]], titles: str, question: str,
                  case_note: str | None) -> list[str]:
     """Every reason the answer can't be shown. Empty list = grounded. listed is [(note key, sentence)], numbered from
@@ -153,11 +175,12 @@ def check_answer(sentences: list[Cited], listed: list[tuple[str, str]], titles: 
             errors.append(f"{i}: a number, link, currency or code not in its sources")
         # ponytail: a double negative ("no reason not to ship") passes; the judge's safe criterion watches it
         if case_note not in {key for key, _ in cited} and (
-                VERDICT.search(s.text) or _ships(s.text)):
+                VERDICT.search(s.text) or _ships(s.text) and not _ship_grounded(s.text, cited)):
             errors.append(f"{i}: a verdict or shipping without the last check's note")
         if NOT_ENGLISH.search(URL.sub("", s.text)):
             errors.append(f"{i}: not plain English")
-        if any(" ".join(m[0].lower().split()) not in source.lower() for m in PERMISSION.finditer(s.text)):
+        note = " ".join(text for key, text in listed if key in {k for k, _ in cited})
+        if any(not _permitted(" ".join(m[0].lower().split()), source.lower(), note) for m in PERMISSION.finditer(s.text)):
             errors.append(f"{i}: a permission not in its sources")
         if PROMISE.search(s.text):
             errors.append(f"{i}: banned phrase")

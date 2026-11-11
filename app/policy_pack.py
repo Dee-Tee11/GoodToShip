@@ -14,6 +14,9 @@ SELLER_PROTECTION = PAYPAL_PAGES + "legalhub/paypal/seller-protection"  # the fu
 SCAMS = PAYPAL_PAGES + "cshelp/article/what-are-common-scams-and-how-do-i-spot-them-help201"
 
 
+WAIT_MEANS = "GoodToShip could not confirm a completed payment of your price."  # one sentence for both verdict notes
+
+
 def _vg(title: str, text: str, anchor: str) -> dict:
     """GoodToShip's own notes, built from scam_check's texts so they can't drift."""
     return {"title": title, "text": text, "source_url": f"README.md#{anchor}", "retrieved_at": "2026-10-22", "verified": True}
@@ -59,9 +62,19 @@ POLICY_PACK = {
         f"When the chat asks you to send money, pay a fee or follow a payment link, the answer also says: {MONEY_OUT_WARNING}",
         "graph-1-scam_check",
     ),
+    # with no check in the chat: what each verdict means, from scam_check's own texts, and never "You can ship"
+    "vg_verdict_meanings": _vg(
+        "What GoodToShip's verdicts mean",
+        "GoodToShip checks a payment in PayPal and gives one of four verdicts.\n"
+        + "\n".join(f"{STEPS[pid][0]}: {STEPS[pid][1]}" for pid in ("P.VERIFIED", "P.VERIFIED_WARN"))
+        + f"\nWAIT: {WAIT_MEANS}\n"
+        f"SCAM_LIKELY: {STEPS['P.SCAM_LIKELY'][1]}\n"
+        "What to do depends on your own payment's verdict: say check to check it.",
+        "graph-1-scam_check",
+    ),
     "vg_why_wait": _vg(
         "Why GoodToShip says WAIT",
-        "WAIT means GoodToShip could not confirm a completed payment of your price, so don't ship yet. "
+        f"WAIT means {WAIT_MEANS[:-1]}, so don't ship yet. "
         "The sentence under WAIT says which of these happened:\n"
         + "\n".join(f"{label}: {shown}" for pid, (label, shown, _) in STEPS.items() if pid.startswith("P.WAIT"))
         + "\nAsk me what to do about yours, for example: the amount paid is not my price, what do I do?",

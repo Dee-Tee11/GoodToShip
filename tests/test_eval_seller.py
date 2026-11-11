@@ -222,7 +222,7 @@ def test_eval_seller(api, monkeypatch, calls, i, rep):
             verdicts = expected.get("verdict") if isinstance(expected.get("verdict"), list) else [expected.get("verdict")]
             shown = lambda keys: [chat.VERIFIED[k]["title"] in reply for k in keys]  # noqa: E731
             sentences, rejected = checked[-1] if len(checked) > n_checked else (0, ["LLM or schema error"])
-            answer = {"grounded": ran[-1] is not None, "sentences": sentences, "rejected": rejected} if len(ran) > n_ran else None
+            answer = {"grounded": bool(ran[-1] and ran[-1][1]), "sentences": sentences, "rejected": rejected} if len(ran) > n_ran else None
             # RECHECK #25: True when the check's explanation is the template, not the LLM's
             template = explained[-1]["template"] if len(explained) > n_explained else None
             turns.append({"say": say, "reply": reply, "route": nodes[-1], "expected": expected, "answer": answer,
