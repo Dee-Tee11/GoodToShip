@@ -4,8 +4,8 @@
 
 Built for the PayPal AI Hackathon (deadline 12 Nov 2026, 20:00 Lisbon). PayPal Sandbox only, no real cases.
 
-- **Live demo:** `https://goodtoship.onrender.com` (sell something, pay as a test buyer, ask the chat to check the buyer's messages, watch every step live)
-- **Demo video:** `https://youtu.be/txNc40kjuZ0`
+- **Live demo:** [goodtoship.onrender.com](https://goodtoship.onrender.com) (sell something, pay as a test buyer, ask the chat to check the buyer's messages, watch every step live)
+- **Demo video:** [youtu.be/txNc40kjuZ0](https://youtu.be/txNc40kjuZ0)
 - **Full reference** (every graph, rule, endpoint and test): [docs/DETAILS.md](docs/DETAILS.md)
 
 ## The problem
@@ -85,7 +85,7 @@ No seller login, no approval board, the chat's conversation in memory, English o
 
 ## How we measure it
 
-- **685 offline tests** (PayPal and Groq mocked): the verdict table, the guardrails, every chat route, the demo's limits and isolation. `tests/test_db.py` runs the real SQL against a throwaway Postgres.
+- **695 offline tests** (PayPal and Groq mocked): the verdict table, the guardrails, every chat route, the demo's limits and isolation. `tests/test_db.py` runs the real SQL against a throwaway Postgres.
 - **Evals with the real model**, with made-up chats only: E06 (44 chats, routing), E07 (61 seller conversations, scored by rules and a judge), E08 (the 33 cases E07 failed most), E09 (every PayPal note still matches its page), E10 (can-I-ship and what-now phrasings), and screenshot evals with drawn chats.
 - Failures found by the evals are kept as open points, not hidden: see [RECHECK.md](RECHECK.md) (for example #52, the answer step falling back on some follow-ups) and [RISKS.md](RISKS.md).
 
@@ -104,6 +104,7 @@ No seller login, no approval board, the chat's conversation in memory, English o
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements-dev.txt
 cp .env.example .env    # PayPal sandbox keys, GROQ_API_KEY, DATABASE_URL; DEMO_MODE=true for /demo
+                        # PAYPAL_WEBHOOK_ID is required to start: any placeholder works without webhooks
 docker run -d -e POSTGRES_PASSWORD=dev -p 5432:5432 postgres
 uvicorn app.main:app --reload --env-file .env
 pytest                   # offline

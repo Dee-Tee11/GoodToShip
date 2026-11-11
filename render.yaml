@@ -10,7 +10,7 @@ services:
     envVars:
       - key: PYTHON_VERSION
         value: 3.12.8
-      - key: DATABASE_URL # Neon, ligação direta (sem pooler)
+      - key: DATABASE_URL # Neon, direct connection (no pooler)
         sync: false
       - key: PAYPAL_CLIENT_ID
         sync: false
