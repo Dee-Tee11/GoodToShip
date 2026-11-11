@@ -1435,12 +1435,12 @@ def test_c44_a_lookup_makes_no_groq_call_and_streams_its_steps(choice, api, save
     out = list(talk.graph.stream({"messages": [{"role": "user", "content": "No."}]}, talk.config,
                                  context=talk.context, stream_mode=["custom", "values"]))
     reply = out[-1][1]["messages"][-1].content
-    assert reply.startswith(f"VERIFIED_WITH_WARNINGS: {chat.LOOKUP_WARN} Ship only to")
-    assert chat.PAYMENT_ONLY in reply and choice.prompts == []
+    assert reply.startswith(f"VERIFIED: {scam_check.POLICY['P.VERIFIED']}")
+    assert chat.PAYMENT_ONLY not in reply and choice.prompts == []
     nodes = [chunk["node"] for mode, chunk in out if mode == "custom" and chunk["type"] == "node"]
     assert nodes == ["ingest_input", "extract_claims", "verify_payment", "compute_verdict", "safe_template",
                      "persist_case"]
-    assert talk.state["cases"][-1]["policy_id"] == "P.VERIFIED_WARN"
+    assert talk.state["cases"][-1]["policy_id"] == "P.VERIFIED"
     assert {c.config["configurable"]["checkpoint_ns"] for c in talk.saver.list(None)} == {""}
 
 
@@ -1548,12 +1548,6 @@ def test_c44_held_ids_go_when_the_check_ends_after_the_price(choice, demo_talk, 
     demo_talk(end)
     assert demo_talk.state["held"] is None and demo_talk.state["awaiting"] != "chat" and not looked and not ran
 
-
-def test_c44_only_a_lookups_verified_with_warnings_says_the_chat_wasnt_checked():
-    warn = FAKE_RESULT | {"verdict": "VERIFIED_WITH_WARNINGS", "policy_id": "P.VERIFIED_WARN",
-                          "message": scam_check.POLICY["P.VERIFIED_WARN"]}
-    assert chat.card(warn, only_ids=True).startswith(f"VERIFIED_WITH_WARNINGS: {chat.LOOKUP_WARN} Ship only to")
-    assert chat.LOOKUP_WARN not in chat.card(warn) and chat.LOOKUP_WARN not in chat.card(FAKE_RESULT, only_ids=True)
 
 
 def test_u26_before_you_ship_is_scam_checks_own_sentences_and_never_gated():

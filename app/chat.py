@@ -164,9 +164,7 @@ ASK_DOUBT = ("Any doubts about the buyer? Paste their chat exactly as written, o
              "Type cancel to stop.")
 PAYMENT_WORDS = ("payment", "no")
 PAYMENT_ONLY = ("I checked only the payment in PayPal, not the buyer's chat. To check the chat for warning signs too, "
-                "say check and paste it.")  # a lookup's card: payment_check reads no chat, and claims nothing
-# a lookup's VERIFIED_WITH_WARNINGS says why it warns, in place of POLICY's "Real payment." (the user's, 2026-11-11)
-LOOKUP_WARN = "Real payment, but I didn't check the buyer's chat."
+                "say check and paste it.")  # a lookup's card: payment_check reads no chat
 # a check's card when scam_check's signals are unknown. No check offered again: the payment may be claimed now
 NOT_READ = "I couldn't check the buyer's chat for warning signs: it had too little text, or reading it failed."
 # neither line above is shown where PayPal alone decides (card): only on VERIFIED_WITH_WARNINGS, which none found makes
@@ -543,10 +541,7 @@ def card(out: dict, only_ids: bool = False, shown: str | None = None) -> str:
     e1 = out["evidence"].get("E1", {})
     paid = _money(e1.get("amount"), e1.get("currency"))
     chat_can_change = out["policy_id"] == "P.VERIFIED_WARN" or e1.get("status") == "NOT_FOUND"
-    message = out["message"]
-    if only_ids and out["policy_id"] == "P.VERIFIED_WARN":
-        message = message.replace("Real payment.", LOOKUP_WARN, 1)
-    return "\n".join([f"{out['verdict']}: {message}", *(s["text"] for s in out["sentences"]),
+    return "\n".join([f"{out['verdict']}: {out['message']}", *(s["text"] for s in out["sentences"]),
                       *([SHOWN_DIFFERS.format(shown, paid)] if shown and paid and shown != paid else []),
                       *([unread] if unread and chat_can_change else []), "What to do:",
                       *(f"{n}. {s}" for n, s in enumerate(steps, 1)), out["support"], f"Case {out['case_id']}"])

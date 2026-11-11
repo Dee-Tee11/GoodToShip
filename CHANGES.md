@@ -1,5 +1,16 @@
 # Changes
 
+## 2026-11-11: a payment-only lookup of a good payment is `VERIFIED`
+
+The user's decision, for this case only: a seller who answers `payment` (or `no`) to `ASK_DOUBT` has no doubts about the buyer, so a payment that passes every gate is `VERIFIED`, not `VERIFIED_WITH_WARNINGS`. A check whose chat couldn't be read keeps `VERIFIED_WITH_WARNINGS`.
+
+- **`payment_check`:** its `compute_verdict` is `scam_check.payment_only_verdict`, the same table with no chat read as no warning sign (`signals: []`). Same 6 nodes; one PayPal can't find is still `WAIT`, never `SCAM_LIKELY`.
+- **A lookup's `VERIFIED` is claimed**, as a check's: its `verify_payment` is `scam_check`'s own again, so the same payment can't approve another order (`WAIT_REUSED` from a lookup or a check). `verify_unclaimed` and `db.payment_claimed` are gone (2026-11-03's "a lookup claims nothing" served the card's "check the chat too", which a `VERIFIED` card doesn't offer).
+- **`chat.LOOKUP_WARN` is gone:** a lookup no longer gives `VERIFIED_WITH_WARNINGS`. "I checked only the payment" stays on a lookup of a payment PayPal can't find.
+- **The VERIFIED note** (`STEPS["P.VERIFIED"]`, in `vg_verdict_meanings` and the "VERIFIED: what to do" note) now reads "…and the chat showed no warning signs, or you asked me to check only the payment.", so "what now?" after a lookup doesn't say a chat was read.
+- **Risk, in RISKS.md:** a `VERIFIED` lookup never reads the buyer's chat, and its steps don't include "Don't refund or pay anything outside PayPal".
+- **Tests:** N03 (a lookup is `VERIFIED` and claims; then a lookup and a check are `WAIT_REUSED`; an unreadable claim is not confirmed), C44 and D39 (`VERIFIED`, no "I checked only the payment"). E07 58 expects `VERIFIED`: to rerun. 695 passing offline, 6 skipped.
+
 ## 2026-11-11: a payment ID alone asks whether the chat is read too
 
 The user's design: a seller who sent only a payment ID got `VERIFIED_WITH_WARNINGS` with no warning sign found, which read as if one had been. The chat is now read only when the seller has doubts. No new graph, node or state field; `verdict_for`, the claim and `payment_check` are unchanged, so a lookup is still never `VERIFIED`.

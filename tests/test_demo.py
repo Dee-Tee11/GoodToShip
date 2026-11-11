@@ -696,7 +696,7 @@ def test_d39_an_id_before_the_price_is_looked_up_and_counts_as_one(api, demo_db,
     capture(api, httpx.Response(200, json=USD_PAID))
     *steps, reply = lines(say(h, "payment"))
     assert (reply["route"], reply["held"]) == ("check", False) and choice.prompts == []
-    assert reply["reply"].startswith(f"VERIFIED_WITH_WARNINGS: {chat.LOOKUP_WARN}") and chat.PAYMENT_ONLY in reply["reply"]
+    assert reply["reply"].startswith("VERIFIED: ") and chat.PAYMENT_ONLY not in reply["reply"]
     nodes = [s for s in steps if s["type"] == "node"]
     assert [s["node"] for s in nodes] == ["ingest_input", "extract_claims", "verify_payment", "compute_verdict",
                                           "safe_template", "persist_case"]

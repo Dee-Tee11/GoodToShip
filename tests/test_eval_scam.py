@@ -85,7 +85,6 @@ def test_eval_scam(api, monkeypatch, calls, case):
     mock_paypal(api, case["paypal"])
     monkeypatch.setattr(db, "save_case", lambda *args: None)
     monkeypatch.setattr(db, "claim_payment", lambda *args: True)
-    monkeypatch.setattr(db, "payment_claimed", lambda *args: False)
     out, error = None, None
     try:
         out = scam_check.run(case["chat"], case["price"], case["currency"])

@@ -135,9 +135,7 @@ def test_test_tracking_marks_a_paid_sale_of_its_session_once():
 def test_u12_claims_hold_in_the_real_sql():
     e, cap = event(uuid.uuid4().hex), uuid.uuid4().hex
     assert db.claim_event(e) and not db.claim_event(e)  # ON CONFLICT DO NOTHING, rowcount 1 then 0
-    assert not db.payment_claimed(cap)
     assert db.claim_payment(cap, "case-1") and not db.claim_payment(cap, "case-2")
-    assert db.payment_claimed(cap)
     with db._connect() as c:
         c.execute("DELETE FROM webhook_events WHERE id = %s", (e["id"],))
         c.execute("DELETE FROM claimed_payments WHERE transaction_id = %s", (cap,))

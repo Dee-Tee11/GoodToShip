@@ -43,7 +43,7 @@ def run(chat=PAID):
 
 @pytest.fixture(autouse=True)
 def claimed(monkeypatch):
-    """Fake db.claim_payment and db.payment_claimed: the set of PayPal ids already approved by a case."""
+    """Fake db.claim_payment: the set of PayPal ids already approved by a case."""
     ids = set()
 
     def claim(transaction_id, case_id):
@@ -53,7 +53,6 @@ def claimed(monkeypatch):
         return True
 
     monkeypatch.setattr(db, "claim_payment", claim)
-    monkeypatch.setattr(db, "payment_claimed", lambda transaction_id: transaction_id in ids)
     return ids
 
 
@@ -352,27 +351,23 @@ def lookup():
     return scam_check.lookup([TID], "25.00", "EUR")
 
 
-def test_n03_a_payment_lookup_is_never_verified_and_calls_no_llm(api, saved, claimed, monkeypatch):
+def test_n03_a_payment_lookup_is_verified_and_calls_no_llm(api, saved, claimed, monkeypatch):
+    """The seller asked for the payment only (chat.ASK_DOUBT): no chat is no warning sign (the user's, 2026-11-11)."""
     asked = []
     monkeypatch.setattr(llm, "ask", lambda *args, **kwargs: asked.append(args))
     monkeypatch.setattr(llm, "read_image", lambda *args: asked.append(args))
     capture(api, httpx.Response(200, json=COMPLETED))
     out = lookup()
-    assert (out["verdict"], out["policy_id"], out["signals_checked"]) == ("VERIFIED_WITH_WARNINGS", "P.VERIFIED_WARN", False)
-    assert out["template"] and out["persisted"] and len(saved) == 1 and not claimed and asked == []
-    assert out["steps"] == scam_check.steps("P.VERIFIED_WARN", None) and list(out["evidence"]) == ["E1"]
-    forged = scam_check.payment_graph.invoke({"chat": TID, "expected_amount": "25.00", "expected_currency": "EUR",
-                                              "signals": []})  # not in its input: dropped
-    assert forged["verdict"] == "VERIFIED_WITH_WARNINGS" and forged.get("signals") is None
+    assert (out["verdict"], out["policy_id"], out["signals_checked"]) == ("VERIFIED", "P.VERIFIED", False)
+    assert out["template"] and out["persisted"] and len(saved) == 1 and asked == []
+    assert out["steps"] == scam_check.steps("P.VERIFIED", None) and list(out["evidence"]) == ["E1"]
 
 
-def test_n03_a_lookup_claims_nothing_so_the_chat_checked_after_it_can_approve_it(api, llm_stub, saved, claimed):
-    """The lookup's card says to check the chat too: when the lookup claimed the payment, that check of the same payment
-    could only say "already used" (review of 2026-11-02)."""
+def test_n03_a_lookups_verified_claims_the_payment_as_a_checks_does(api, llm_stub, saved, claimed):
+    """A VERIFIED is claimed, so the same payment can't approve another order, through a lookup or a check."""
     capture(api, httpx.Response(200, json=COMPLETED))
-    assert lookup()["policy_id"] == "P.VERIFIED_WARN" and not claimed
-    assert run()["verdict"] == "VERIFIED" and claimed == {TID}
-    assert lookup()["policy_id"] == "P.WAIT_REUSED"  # approved by that check now
+    assert lookup()["policy_id"] == "P.VERIFIED" and claimed == {TID}
+    assert lookup()["policy_id"] == "P.WAIT_REUSED" and run()["policy_id"] == "P.WAIT_REUSED"
 
 
 @pytest.mark.parametrize("case, policy", [("shipped", "P.WAIT_SHIPPED"), ("used", "P.WAIT_REUSED"),
@@ -389,7 +384,7 @@ def test_n03_a_payment_lookup_keeps_every_payment_gate(api, saved, claimed, monk
     if case == "used":
         claimed.add(TID)
     if case == "claims unreadable":
-        monkeypatch.setattr(db, "payment_claimed", lambda *a: (_ for _ in ()).throw(psycopg.OperationalError("down")))
+        monkeypatch.setattr(db, "claim_payment", lambda *a: (_ for _ in ()).throw(psycopg.OperationalError("down")))
     assert lookup()["policy_id"] == policy
 
 

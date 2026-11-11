@@ -93,13 +93,6 @@ def claim_payment(transaction_id: str, case_id: str) -> bool:
         return cur.rowcount == 1
 
 
-def payment_claimed(transaction_id: str) -> bool:
-    """True if an earlier case approved this payment. Reads only: payment_check's lookup claims nothing."""
-    with _connect() as c:
-        return c.execute("SELECT EXISTS (SELECT 1 FROM claimed_payments WHERE transaction_id = %s)",
-                         (transaction_id,)).fetchone()[0]
-
-
 def save_case(case_id: str, verdict: str, result: dict) -> None:
     """One scam_check result. `result` holds no raw chat and no buyer quotes."""
     with _connect() as c:

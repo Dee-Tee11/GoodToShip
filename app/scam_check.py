@@ -2,8 +2,8 @@
 
 PayPal is the source of truth. The LLM copies the screenshot's text, reads the chat for scam signals and writes
 the explanation; it never sees credentials, has no tools, and cannot write the verdict or the instruction to the seller.
-payment_graph (payment_check) runs the same nodes without the chat and the LLM, for payment IDs the chat held, and claims
-nothing.
+payment_graph (payment_check) runs the same nodes without the chat and the LLM, for payment IDs the chat held, when the
+seller asked for the payment only: a good payment is VERIFIED, and claimed, as a check's.
 """
 import functools
 import logging
@@ -61,7 +61,8 @@ SHIP = ("Ship only to the address on this payment's Transaction Details page in 
 NEW_ID = "Ask the buyer for the transaction ID of the payment for this order."
 STEPS = {  # policy_id: (label, what PayPal showed, next steps)
     "P.VERIFIED": (
-        "VERIFIED", "PayPal has a completed payment of your price, and the chat showed no warning signs.", SHIP,
+        "VERIFIED", "PayPal has a completed payment of your price, and the chat showed no warning signs, or you asked "
+        "me to check only the payment.", SHIP,
     ),
     "P.VERIFIED_WARN": (
         "VERIFIED_WITH_WARNINGS", "PayPal has a completed payment of your price, but the chat showed warning signs, "
@@ -449,11 +450,11 @@ def verify_payment(state):
     return _verify(state, db.claim_payment)
 
 
-@owns("payment")
-def verify_unclaimed(state):
-    """payment_check's verify_payment: reads whether a case already approved the payment, and claims nothing, so the
-    check of the buyer's chat that a lookup's card offers can still approve it."""
-    return _verify(state, lambda paypal_id, case_id: not db.payment_claimed(paypal_id))
+@owns("verdict", "policy_id", "evidence")
+def payment_only_verdict(state):
+    """payment_check's compute_verdict: the seller asked for the payment only (chat.ASK_DOUBT), so no chat is no warning
+    sign (the user's, 2026-11-11). The same table: only a payment that passes every gate is VERIFIED."""
+    return compute_verdict(state | {"signals": []})
 
 
 @owns("verdict", "policy_id", "evidence")
@@ -563,7 +564,7 @@ def result(state) -> dict:
 
 
 class PaymentIn(TypedDict):
-    """payment_graph's whole input: no signals, claims or payment, so nothing passed in can make a VERIFIED."""
+    """payment_graph's whole input: no claims or payment, so nothing passed in can skip a payment gate."""
     chat: str  # the payment IDs the chat held for the price, space-separated; extract_claims keeps only TXN_ID's
     expected_amount: str
     expected_currency: str
@@ -591,12 +592,14 @@ def _build():
 
 
 def _build_payment():
-    """payment_check: the payment IDs the chat held for the price, checked in PayPal by scam_check's own nodes, so
-    every payment gate comes with verify_payment, here claiming nothing. No chat and no LLM node: signals stay unknown,
-    so at best VERIFIED_WITH_WARNINGS. safe_template writes the reply, as there is no draft to validate."""
+    """payment_check: the payment IDs the chat held, once the seller asked for the payment only, checked in PayPal by
+    scam_check's own nodes, so every payment gate comes with verify_payment, which claims a good payment as a check
+    does. No chat and no LLM node: payment_only_verdict reads no chat as no warning sign, so a good payment is VERIFIED,
+    and one PayPal can't find is WAIT, never SCAM_LIKELY. safe_template writes the reply, as there is no draft to
+    validate."""
     g = StateGraph(State, input_schema=PaymentIn)
-    g.add_sequence([ingest_input, extract_claims, ("verify_payment", verify_unclaimed), compute_verdict, safe_template,
-                    persist_case])
+    g.add_sequence([ingest_input, extract_claims, verify_payment, ("compute_verdict", payment_only_verdict),
+                    safe_template, persist_case])
     g.add_edge(START, "ingest_input")
     g.add_edge("persist_case", END)
     return g.compile()
