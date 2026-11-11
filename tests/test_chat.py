@@ -1384,12 +1384,15 @@ def test_c43_only_the_demos_run_streams_the_checks_steps(choice, api, saved, llm
     assert {c.config["configurable"]["checkpoint_ns"] for c in talk.saver.list(None)} == {""}
 
 
-def test_c44_an_id_before_check_is_held_and_the_price_looks_it_up(choice, talk, ran, looked):
-    """RECHECK #31: the ID was asked for again at the chat step. Its IDs only are held, never the message."""
+def test_c44_an_id_before_check_is_held_and_payment_looks_it_up(choice, talk, ran, looked):
+    """RECHECK #31: the ID was asked for again at the chat step. Its IDs only are held, never the message. After the
+    price, the seller says whether the chat is read too (the user's design, 2026-11-11): payment, it isn't."""
     assert talk(f"Can you check this status for me ? {TID}") == held_reply(chat.IDS_FIRST.format(f"payment {TID}"),
                                                                             chat.ONLY_IDS.format(""))
     assert choice.calls == [] and talk.state["awaiting"] == "price" and talk.state["held"] == [{"ids": [TID]}]
-    reply = talk("25.00 USD")
+    assert talk("25.00 USD") == chat.ASK_DOUBT and not looked and not ran
+    assert talk.state["awaiting"] == "chat" and talk.state["held"] == [{"ids": [TID]}]
+    reply = talk("payment")
     assert looked == [([TID], "25.00", "USD", None)] and ran == [] and choice.calls == []
     assert reply == chat.card(FAKE_RESULT, only_ids=True) and chat.PAYMENT_ONLY in reply
     assert not talk.state["awaiting"] and talk.state["held"] is None and talk.state["cases"][-1]["case_id"] == "c1"
@@ -1428,10 +1431,12 @@ def test_c44_a_lookup_makes_no_groq_call_and_streams_its_steps(choice, api, save
     capture(api, httpx.Response(200, json=COMPLETED))
     talk = Talk({"live": chat.LIVE})
     talk(f"Is {TID} a real payment?")
-    out = list(talk.graph.stream({"messages": [{"role": "user", "content": "25.00 EUR"}]}, talk.config,
+    talk("25.00 EUR")
+    out = list(talk.graph.stream({"messages": [{"role": "user", "content": "No."}]}, talk.config,
                                  context=talk.context, stream_mode=["custom", "values"]))
     reply = out[-1][1]["messages"][-1].content
-    assert reply.startswith("VERIFIED_WITH_WARNINGS: ") and chat.PAYMENT_ONLY in reply and choice.prompts == []
+    assert reply.startswith(f"VERIFIED_WITH_WARNINGS: {chat.LOOKUP_WARN} Ship only to")
+    assert chat.PAYMENT_ONLY in reply and choice.prompts == []
     nodes = [chunk["node"] for mode, chunk in out if mode == "custom" and chunk["type"] == "node"]
     assert nodes == ["ingest_input", "extract_claims", "verify_payment", "compute_verdict", "safe_template",
                      "persist_case"]
@@ -1471,7 +1476,8 @@ def test_c44_up_to_3_are_held_the_oldest_dropped_and_the_price_checks_them_all(c
     reply = talk(more[1])
     assert chat.DROPPED.format(f"your screenshot with payment {TID}") in reply
     assert [item["ids"] for item in talk.state["held"]] == [[TID2], [more[0]], [more[1]]]
-    talk("25.00 USD")  # IDs alone now: a lookup
+    talk("25.00 USD")  # IDs alone now: a lookup, once the seller says payment
+    talk("payment")
     assert looked == [([more[1], more[0], TID2], "25.00", "USD", None)] and len(ran) == 1
 
 
@@ -1499,7 +1505,55 @@ def test_c44_an_id_at_the_price_step_is_held(choice, talk, looked):
     assert talk(f"sorry, this one: {TID2}") == held_reply(chat.IDS_FIRST.format(f"payment {TID2}"), chat.ONLY_IDS.format(""),
                                                           chat.HOLDING.format(2, f"payment {TID}; payment {TID2}"))
     talk("25.00 USD")
+    talk("payment")
     assert looked == [([TID2, TID], "25.00", "USD", None)]  # the newest first
+
+
+def test_c44_the_buyers_chat_after_the_price_is_read_with_the_held_ids(choice, llm_stub, talk, ran, looked):
+    """The user's design (2026-11-11): IDs held alone are read with the chat the seller pastes, so a check can give
+    VERIFIED. Any answer but payment or no is the buyer's chat, as at the chat step."""
+    talk(TID)
+    talk("25.00 USD")
+    talk("Buyer: please ship today")
+    assert ran == [(f"Buyer: please ship today\n\n{TID}", "25.00", "USD", None, None)] and not looked
+    assert talk.state["held"] is None and not talk.state["awaiting"]
+    talk(TID)
+    talk("25.00 USD")
+    talk(shot("hi"))  # a screenshot: scam_check reads it, with its text and the IDs
+    assert ran[-1][0] == f"hi\n\n{TID}" and ran[-1][3] == PNG and not looked
+    talk(TID)
+    talk("25.00 USD")
+    talk("payment please")  # not the word: the buyer's chat
+    assert ran[-1][0] == f"payment please\n\n{TID}" and not looked
+    for word in ("Payment", "NO!"):
+        talk(TID)
+        talk("25.00 USD")
+        talk(word)
+    assert len(looked) == 2 and len(ran) == 3
+
+
+def test_c44_an_unreadable_screenshot_after_the_price_keeps_the_ids(choice, llm_stub, talk, looked):
+    llm_stub.transcript = RuntimeError("vision down")
+    talk(TID)
+    talk("25.00 USD")
+    assert talk(shot()).endswith("Type cancel to stop.") and talk.state["held"] == [{"ids": [TID]}]
+    talk("payment")
+    assert looked == [([TID], "25.00", "USD", None)]
+
+
+@pytest.mark.parametrize("end", ["cancel", "operator"])
+def test_c44_held_ids_go_when_the_check_ends_after_the_price(choice, demo_talk, looked, ran, end):
+    demo_talk(TID)
+    demo_talk("25.00 USD")
+    demo_talk(end)
+    assert demo_talk.state["held"] is None and demo_talk.state["awaiting"] != "chat" and not looked and not ran
+
+
+def test_c44_only_a_lookups_verified_with_warnings_says_the_chat_wasnt_checked():
+    warn = FAKE_RESULT | {"verdict": "VERIFIED_WITH_WARNINGS", "policy_id": "P.VERIFIED_WARN",
+                          "message": scam_check.POLICY["P.VERIFIED_WARN"]}
+    assert chat.card(warn, only_ids=True).startswith(f"VERIFIED_WITH_WARNINGS: {chat.LOOKUP_WARN} Ship only to")
+    assert chat.LOOKUP_WARN not in chat.card(warn) and chat.LOOKUP_WARN not in chat.card(FAKE_RESULT, only_ids=True)
 
 
 def test_u26_before_you_ship_is_scam_checks_own_sentences_and_never_gated():

@@ -4,8 +4,9 @@ One LLM call per message picks closed choices: an intent and policy_pack keys. A
 second one, which writes 1-3 sentences that cite the notes' sentences and pass output_guardrails.check_answer, or the
 notes are quoted, then PayPal's line, or a person on the demo. Every other word the seller reads is written here, by
 scam_check or dispute_draft, or comes from PayPal (a title and a link). The buyer's chat goes to scam_check.run() as
-typed and never reaches this module's LLM calls or Tavily. A short message with a payment ID keeps only its IDs, which
-the price looks up with scam_check.lookup() (payment_check, no LLM). The price comes from the seller's own message, read
+typed and never reaches this module's LLM calls or Tavily. A short message with a payment ID keeps only its IDs. After
+the price, the seller pastes the buyer's chat, read with them by scam_check.run(), or says payment, and they are looked
+up with scam_check.lookup() (payment_check, no LLM). The price comes from the seller's own message, read
 by a regex. A short message with a practice dispute ID (PP-SIM-…) goes to dispute_draft.run() without classify: a
 fictional scenario from a file, no PayPal call, no LLM. A real dispute ID gets a fixed text: GoodToShip doesn't read
 disputes in PayPal (2026-11-07). A seller who asks for a person (the human intent, or the word operator at any step)
@@ -156,8 +157,16 @@ HOLDING = "I'm holding {} for the check: {}."
 # the screenshot's own amount, which the buyer chose: after the check only, and only beside PayPal's when they differ,
 # so the seller writes their own price first (a buyer who paid half shows half)
 SHOWN_DIFFERS = "Your screenshot shows {}, but PayPal shows {} for this payment. Only PayPal's amount counts."
+# after the price, for payment IDs held alone (the user's design, 2026-11-11): the chat is read only when the seller has
+# doubts. Any other answer is the buyer's chat, as at the chat step: no LLM decides which it is
+ASK_DOUBT = ("Any doubts about the buyer? Paste their chat exactly as written, or send a screenshot of it, and I'll "
+             "check it for warning signs too. No doubts? Say payment, and I'll check only the payment in PayPal. "
+             "Type cancel to stop.")
+PAYMENT_WORDS = ("payment", "no")
 PAYMENT_ONLY = ("I checked only the payment in PayPal, not the buyer's chat. To check the chat for warning signs too, "
                 "say check and paste it.")  # a lookup's card: payment_check reads no chat, and claims nothing
+# a lookup's VERIFIED_WITH_WARNINGS says why it warns, in place of POLICY's "Real payment." (the user's, 2026-11-11)
+LOOKUP_WARN = "Real payment, but I didn't check the buyer's chat."
 # a check's card when scam_check's signals are unknown. No check offered again: the payment may be claimed now
 NOT_READ = "I couldn't check the buyer's chat for warning signs: it had too little text, or reading it failed."
 # neither line above is shown where PayPal alone decides (card): only on VERIFIED_WITH_WARNINGS, which none found makes
@@ -534,7 +543,10 @@ def card(out: dict, only_ids: bool = False, shown: str | None = None) -> str:
     e1 = out["evidence"].get("E1", {})
     paid = _money(e1.get("amount"), e1.get("currency"))
     chat_can_change = out["policy_id"] == "P.VERIFIED_WARN" or e1.get("status") == "NOT_FOUND"
-    return "\n".join([f"{out['verdict']}: {out['message']}", *(s["text"] for s in out["sentences"]),
+    message = out["message"]
+    if only_ids and out["policy_id"] == "P.VERIFIED_WARN":
+        message = message.replace("Real payment.", LOOKUP_WARN, 1)
+    return "\n".join([f"{out['verdict']}: {message}", *(s["text"] for s in out["sentences"]),
                       *([SHOWN_DIFFERS.format(shown, paid)] if shown and paid and shown != paid else []),
                       *([unread] if unread and chat_can_change else []), "What to do:",
                       *(f"{n}. {s}" for n, s in enumerate(steps, 1)), out["support"], f"Case {out['case_id']}"])
@@ -661,6 +673,10 @@ def _held_name(item: dict) -> str:
     return f"your screenshot with {_payments(item['ids'])}" if item["ids"] else "your screenshot with no transaction ID"
 
 
+def _shots(held: list[dict] | None) -> bool:
+    return any("transcript" in item for item in held or [])
+
+
 def _check_text(held: list[dict]) -> str:
     """What scam_check reads for what is held: each screenshot's copy and each message's IDs, newest first, so the
     check's 3 IDs are the newest."""
@@ -729,13 +745,15 @@ def start_check(state):
 
 
 def runs_scam_check(state, text: str | None, image: bytes | None = None) -> bool:
-    """True when check() runs a check on this message: scam_check on the chat as text, a screenshot, or both, or the
-    price once something is held (payment_check for IDs alone). A route that exposes the chat counts it as a check and
-    takes main.SCAM_LIMIT for it, as /scam-check does (503 when busy). Studio has no limit, as with scam_check today."""
+    """True when check() runs a check on this message: scam_check on the chat as text, a screenshot, or both, the
+    price once a screenshot is held, or payment at the chat step for IDs held alone (payment_check). A route that
+    exposes the chat counts it as a check and takes main.SCAM_LIMIT for it, as /scam-check does (503 when busy). Studio
+    has no limit, as with scam_check today."""
     if text is None or text.strip().casefold() in ("cancel", "operator"):
         return False
     if state.get("awaiting") == "price":  # what is held is the whole chat: the price message's text isn't the buyer's
-        return parse_price(text) is not None and (image is not None or bool(state.get("held")))
+        # IDs alone wait for ASK_DOUBT's answer
+        return parse_price(text) is not None and (image is not None or _shots(state.get("held")))
     if state.get("awaiting") != "chat" or not state.get("price"):
         return False
     clean = sanitize(text)
@@ -757,9 +775,10 @@ def reads_screenshot(state, text: str | None, image: bytes | None) -> bool:
 @owns("messages", "awaiting", "price", "shown", "cases", "last_question", "held")
 def check(state):
     """No LLM here but scam_check's. At the price step, a screenshot or a short message with a payment ID is held, as
-    before check, and the price checks everything held: scam_check on the screenshots' copies and the IDs, or
-    payment_check for IDs alone. At the chat step, scam_check runs exactly when runs_scam_check says so, with this
-    message's screenshot if there is one."""
+    before check, and the price checks everything held with scam_check: the screenshots' copies and the IDs. IDs held
+    alone wait for ASK_DOUBT's answer at the chat step: payment looks them up with payment_check, a chat is read with
+    them. At the chat step, scam_check runs exactly when runs_scam_check says so, with this message's screenshot if
+    there is one."""
     text, image = _text(state), _screenshot(state)
     if image is not None:
         text = str(state["messages"][-1].text)  # the text sent with the screenshot, often none
@@ -767,23 +786,24 @@ def check(state):
         return _say(CANCELLED, awaiting=None, price=None, held=None)  # only this check: the earlier ones stay
     if text is None:
         return _say(ONLY_TEXT)
-    held, dropped = state.get("held") or [], []
+    held, dropped, chat = state.get("held") or [], [], text
     if state.get("awaiting") == "price":
         if not (price := parse_price(text)):  # held without the price, as before check
             return _hold(held, text, image, TEXT_DROPPED) or _say(BAD_PRICE)
-        if not runs_scam_check(state, text, image):
-            return _say(ASK_CHAT, awaiting="chat", price=price)
+        if not runs_scam_check(state, text, image):  # IDs held alone stay held for the answer
+            return _say(ASK_DOUBT if held else ASK_CHAT, awaiting="chat", price=price)
         if image is not None:  # sent with the price: read and held like the others, then checked with them
             try:
                 held, dropped = _add(held, _read(image))
             except scam_check.Unreadable as e:  # nothing lost: the seller sends the price again
                 return _say(f"{str(e).capitalize()}. {ASK_PRICE}")
+        chat, image = "", None  # the price message's text isn't the buyer's chat, and its screenshot is held now
     elif state.get("awaiting") != "chat" or not (price := state.get("price")):
         # the START router reads the raw input, where a crafted "awaiting" passes; the nodes see it filtered out
         return _say(ASK_PRICE, awaiting="price", price=None, held=None)
     elif not runs_scam_check(state, text, image):
         return _say(BAD_CHAT)
-    lookup = bool(held) and not any("transcript" in item for item in held)
+    lookup = bool(held) and image is None and chat.strip().casefold().rstrip(".!") in PAYMENT_WORDS
     try:
         # an empty context: a graph invoked inside a node inherits the caller's checkpointer and stream, which would
         # store scam_check's state (the chat, the buyer's quotes) in this thread and stream it to Studio
@@ -795,13 +815,12 @@ def check(state):
         if lookup:  # newest first: payment_check keeps the first 3
             out = contextvars.Context().run(scam_check.lookup, [i for item in reversed(held) for i in item["ids"]],
                                             price["amount"], price["currency"], report)
-        elif held:  # the copies and the IDs, already read: the price message's text isn't the buyer's chat
-            out = contextvars.Context().run(scam_check.run, _check_text(held), price["amount"], price["currency"],
-                                            None, report)
-        else:
-            out = contextvars.Context().run(scam_check.run, text, price["amount"], price["currency"], image, report)
+        else:  # newest first: this message's chat, then what is held (the copies and the IDs, already read)
+            # ponytail: up to 3 held IDs (~54 characters) can take a full chat past MAX_CHARS; _add it if that matters
+            out = contextvars.Context().run(scam_check.run, "\n\n".join(filter(None, [chat, _check_text(held)])),
+                                            price["amount"], price["currency"], image, report)
     except scam_check.Unreadable as e:  # the chat step's screenshot: no verdict and no case, sent again
-        return _say(f"{str(e).capitalize()}. Type cancel to stop.", awaiting="chat", price=price, held=None)
+        return _say(f"{str(e).capitalize()}. Type cancel to stop.", awaiting="chat", price=price)  # held kept
     except Exception as e:
         log.warning("check failed: %s", type(e).__name__)
         return _say(CHECK_FAILED, awaiting=None, price=None, held=None)

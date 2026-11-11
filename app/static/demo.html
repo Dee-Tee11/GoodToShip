@@ -643,8 +643,10 @@ async function prepare(key) {
   // "check" would answer the question, or go to the person
   if (awaiting === "consent") return note("ask-note", "Answer the question about sharing first: yes, or anything else to keep it to yourself.", true);
   if (!$("with-person").hidden) return note("ask-note", "A person from GoodToShip has this conversation. To check a buyer's chat with GoodToShip, press Stop sharing.", true);
-  // the price would run the check on that screenshot or payment ID, not on this chat
+  // the price would run the check on that screenshot or payment ID, not on this chat; after the price, IDs held alone
+  // would be read with this chat (chat.ASK_DOUBT)
   if (awaiting === "price" && held) return note("ask-note", "Your screenshot or payment ID is waiting for its price: send the price, or type cancel first.", true);
+  if (awaiting === "chat" && held) return note("ask-note", "Your payment ID is waiting: paste the buyer's chat, say payment, or type cancel first.", true);
   const scenario = SCENARIOS[key];
   const order = scenario.order && pick(scenario.order);
   if (scenario.order && !order) return scenarios();  // its order shipped since the chips were drawn: now locked

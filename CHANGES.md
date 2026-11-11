@@ -1,5 +1,17 @@
 # Changes
 
+## 2026-11-11: a payment ID alone asks whether the chat is read too
+
+The user's design: a seller who sent only a payment ID got `VERIFIED_WITH_WARNINGS` with no warning sign found, which read as if one had been. The chat is now read only when the seller has doubts. No new graph, node or state field; `verdict_for`, the claim and `payment_check` are unchanged, so a lookup is still never `VERIFIED`.
+
+- **The price no longer looks up IDs held alone.** It asks `chat.ASK_DOUBT` ("Any doubts about the buyer? Paste their chat … No doubts? Say payment …") and takes no check limit. A held screenshot still checks at the price, as before.
+- **The answer, never classified:** `payment` or `no` (any case, a final `.` or `!`; `PAYMENT_WORDS`) runs `payment_check`, counted as a check. Anything else is the buyer's chat: `scam_check.run()` reads it, with its screenshot, and the held IDs after it, so it can give `VERIFIED`. A screenshot that can't be read keeps the IDs; cancel and `operator` clear them.
+- **A lookup's `VERIFIED_WITH_WARNINGS` says why:** its card starts "Real payment, but I didn't check the buyer's chat." (`chat.LOOKUP_WARN`) instead of "Real payment.". A check's card is unchanged.
+- **Known edge, accepted by the user:** an answer of 5 or more words ("No, I have no doubts about him") is read as the buyer's chat and can give `VERIFIED`, as anything typed at the chat step already can. Under 5 words, the signals stay unknown.
+- **Demo:** the scenario chips also wait at this step (`awaiting === "chat" && held`), so a scenario's chat isn't read with the seller's ID.
+- **Tests:** C44 (the flow through `payment`; the chat and a screenshot read with the IDs; `payment please` is a chat; `Payment` and `NO!` look up; an unreadable screenshot keeps the IDs; cancel and `operator` clear them; `LOOKUP_WARN` only on a lookup's `VERIFIED_WITH_WARNINGS`), D39 (the price takes no check, `payment` takes one). 696 passing offline, 6 skipped.
+- **Evals:** E07 58 (`seller_dataset.jsonl`), the only case that sends an ID and then a price, gets a third turn, `payment`, and its reference says the price asks first: to rerun.
+
 ## 2026-11-10: `/code-review` of the uncommitted work (#35, #52, the E07 review)
 
 Ten findings; the user accepted #4 (a person offered in Studio and the evals too, where nobody answers) and #8 (no check: an answer naming a verdict always falls back, to the right quoted sentence). The rest fixed:

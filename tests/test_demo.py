@@ -683,17 +683,20 @@ def test_d38_a_shipped_sales_payment_gives_wait_shipped_in_the_chat(api, demo_db
 
 
 def test_d39_an_id_before_the_price_is_looked_up_and_counts_as_one(api, demo_db, choice, llm_stub):
-    """RECHECK #31: the price looks the held ID up with payment_check, a check with no Groq call and no screenshot.
-    held tells the page that the chips must wait."""
+    """RECHECK #31: payment, after the price, looks the held ID up with payment_check, a check with no Groq call and no
+    screenshot. The price alone takes no check (2026-11-11). held tells the page that the chips must wait."""
     h = start()
     sid = h["X-Demo-Session"]
     early = said(h, f"Can you check this status for me ? {TID}")
     assert (early["route"], early["held"]) == ("start_check", True)
-    assert demo.runs_check(sid, "45.00 USD") == ["check"] and demo.runs_check(sid, "cancel") == []
+    assert demo.runs_check(sid, "45.00 USD") == [] and demo.runs_check(sid, "cancel") == []
+    asked = said(h, "45.00 USD")
+    assert (asked["reply"], asked["awaiting"], asked["held"]) == (chat.ASK_DOUBT, "chat", True)
+    assert demo.runs_check(sid, "payment") == ["check"] and not ratelimit._hits[("1.1.1.1", "check")]
     capture(api, httpx.Response(200, json=USD_PAID))
-    *steps, reply = lines(say(h, "45.00 USD"))
+    *steps, reply = lines(say(h, "payment"))
     assert (reply["route"], reply["held"]) == ("check", False) and choice.prompts == []
-    assert reply["reply"].startswith("VERIFIED_WITH_WARNINGS: ") and chat.PAYMENT_ONLY in reply["reply"]
+    assert reply["reply"].startswith(f"VERIFIED_WITH_WARNINGS: {chat.LOOKUP_WARN}") and chat.PAYMENT_ONLY in reply["reply"]
     nodes = [s for s in steps if s["type"] == "node"]
     assert [s["node"] for s in nodes] == ["ingest_input", "extract_claims", "verify_payment", "compute_verdict",
                                           "safe_template", "persist_case"]
